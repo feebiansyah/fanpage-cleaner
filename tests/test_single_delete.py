@@ -10,6 +10,7 @@ import httpx
 from app import create_app
 from config import Settings
 from sessions import Page
+from unittest.mock import patch
 
 
 HEADERS = {'X-Fanpage-Client': '1', 'Origin': 'http://127.0.0.1:8000'}
@@ -25,6 +26,150 @@ def item():
 
 
 class SingleDelete(unittest.IsolatedAsyncioTestCase):
+    async def test_older_attempt_cannot_overwrite_newer_session_result(self):
+        cid=(await self.prepare()).json()['confirmation_id']
+        second={**item(),'key':'published_posts:11_124','object_id':'11_124',
+                'sources':[{'source':'published_posts','object_id':'11_124'}]}
+        self.store.audits.entries[self.sid].data['items'].append(second)
+        self.allowed_targets.add('11_124')
+        cid2=(await self.prepare({'page_id':'11','keys':[second['key']]})).json()['confirmation_id']
+        entered=[asyncio.Event(),asyncio.Event()]
+        release=[asyncio.Event(),asyncio.Event()]
+        async def delayed(request):
+            index=0 if request.url.path.endswith('11_123') else 1
+            entered[index].set()
+            await release[index].wait()
+            return httpx.Response(200,json={'success':True})
+        self.response=delayed
+        first=asyncio.create_task(self.execute(cid))
+        await asyncio.wait_for(entered[0].wait(),2)
+        newer=asyncio.create_task(self.execute(cid2))
+        await asyncio.wait_for(entered[1].wait(),2)
+        release[0].set()
+        await first
+        pending=(await self.client.get('/api/posts/delete/last',headers=HEADERS)).json()
+        self.assertEqual(pending['state'],'processing')
+        self.assertEqual(pending['result']['target']['target_id'],'11_124')
+        release[1].set()
+        await newer
+        latest=(await self.client.get('/api/posts/delete/last',headers=HEADERS)).json()
+        self.assertEqual(latest['result']['target']['target_id'],'11_124')
+        self.assertEqual(latest['result']['outcome'],'succeeded')
+        self.assertEqual(len(self.calls),2)
+
+    async def test_safe_response_shape_diagnosis_without_raw_content(self):
+        cases = [
+            (httpx.Response(200,json={'success':'dummy-page-secret'}),True,'string',False,'success_not_boolean'),
+            (httpx.Response(200,json={'success':False}),True,'boolean',False,'success_not_true'),
+            (httpx.Response(200,json={'success':True,'error':None}),True,'boolean',True,'error_field_present'),
+            (httpx.Response(200,json={}),True,'missing',False,'success_missing'),
+            (httpx.Response(200,content=b'<html>dummy-page-secret</html>',headers={'Content-Type':'text/html; charset=utf-8'}),False,'unavailable',None,'json_parse_failed'),
+        ]
+        for response, parsed, success_type, has_error, issue in cases:
+            self.response=response
+            cid=(await self.prepare()).json()['confirmation_id']
+            result=(await self.execute(cid)).json()
+            diag=result['diagnostic']
+            self.assertEqual(result['reason'],'response_unverified')
+            self.assertEqual(diag['reason'],'response_unverified')
+            self.assertEqual(diag['json_parsed'],parsed)
+            self.assertEqual(diag['success_type'],success_type)
+            self.assertEqual(diag['has_error_field'],has_error)
+            self.assertEqual(diag['response_issue'],issue)
+            self.assertNotIn(TOKEN,str(result))
+            self.assertEqual(diag['content_type'],'text/html' if parsed is False else 'application/json')
+        self.assertEqual(len(self.calls),len(cases))
+
+    async def test_last_result_is_local_owner_scoped_and_expires_with_session(self):
+        path='/api/posts/delete/last'
+        initial=await self.client.get(path,headers=HEADERS)
+        self.assertEqual(initial.status_code,200,initial.text)
+        self.assertEqual(initial.json()['state'],'not_available')
+        self.response=httpx.ReadTimeout(TOKEN)
+        cid=(await self.prepare()).json()['confirmation_id']
+        result=(await self.execute(cid)).json()
+        before=len(self.calls)
+        for _ in range(3):
+            stored=await self.client.get(path,headers=HEADERS)
+            self.assertEqual(stored.json()['result'],result)
+            self.assertEqual(stored.headers['cache-control'],'no-store')
+        self.assertEqual(len(self.calls),before)
+        other=self.browser()
+        bid,_,_=self.store.bootstrap(None)
+        sid,_=self.store.replace(bid,'other-user',[Page('11','Same Page',TOKEN)])
+        other.cookies.set('fanpage_browser',bid)
+        other.cookies.set('fanpage_session',sid)
+        self.assertEqual((await other.get(path,headers=HEADERS)).json()['state'],'not_available')
+        self.assertEqual((await self.client.get(path,headers={'X-Fanpage-Client':'1','Origin':'https://evil.example'})).status_code,403)
+        self.session.expires_at=time.monotonic()-1
+        self.assertEqual((await self.client.get(path,headers=HEADERS)).status_code,401)
+        self.assertNotIn(self.sid,self.app.state.single_delete.last_results)
+        await other.aclose()
+
+    async def test_internal_exception_code_preserves_status_without_exception_message(self):
+        cid=(await self.prepare()).json()['confirmation_id']
+        with patch.object(self.app.state.graph,'_usage',side_effect=RuntimeError(TOKEN)):
+            result=(await self.execute(cid)).json()
+        self.assertEqual(result['reason'],'internal_error')
+        self.assertEqual(result['diagnostic']['internal_code'],'response_headers.runtime_error')
+        self.assertEqual(result['diagnostic']['http_status'],200)
+        self.assertNotIn(TOKEN,str(result))
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(len(self.store.audits.get(self.sid,'11')['items']),1)
+
+    async def test_cache_exception_is_diagnosed_and_restart_cannot_restore_result(self):
+        cid=(await self.prepare()).json()['confirmation_id']
+        with patch.object(self.store.audits,'invalidate_post',side_effect=KeyError(TOKEN)):
+            result=(await self.execute(cid)).json()
+        self.assertEqual(result['reason'],'internal_error')
+        self.assertEqual(result['diagnostic']['internal_code'],'cache_invalidation.key_error')
+        self.assertEqual(result['diagnostic']['http_status'],200)
+        self.assertTrue(result['diagnostic']['json_parsed'])
+        self.assertNotIn(TOKEN,str(result))
+        self.assertEqual(len(self.calls),1)
+        self.store.clear()  # Memory loss at shutdown/restart, no persisted attribution.
+        bid,_,_=self.store.bootstrap(None)
+        sid,_=self.store.replace(bid,'new-user',[Page('11','Fanpage',TOKEN)])
+        self.client.cookies.set('fanpage_browser',bid)
+        self.client.cookies.set('fanpage_session',sid)
+        stored=(await self.client.get('/api/posts/delete/last',headers=HEADERS)).json()
+        self.assertEqual(stored['state'],'not_available')
+        self.assertIn('restart',stored['message'])
+        self.assertEqual(len(self.calls),1)
+
+    async def test_content_type_is_allowlisted_and_large_body_never_exposed(self):
+        self.response=httpx.Response(200,content=b'{',headers={'Content-Type':TOKEN})
+        cid=(await self.prepare()).json()['confirmation_id']
+        result=(await self.execute(cid)).json()
+        self.assertEqual(result['diagnostic']['content_type'],'other')
+        self.assertFalse(result['diagnostic']['json_parsed'])
+        self.assertNotIn(TOKEN,str(result))
+        self.app.state.graph.settings=Settings(max_response_bytes=8)
+        self.response=httpx.Response(200,content=b'x'*9)
+        cid=(await self.prepare()).json()['confirmation_id']
+        result=(await self.execute(cid)).json()
+        self.assertEqual(result['diagnostic']['response_issue'],'response_too_large')
+        self.assertIsNone(result['diagnostic']['json_parsed'])
+        self.assertEqual(len(self.calls),2)
+
+    async def test_interruption_recorded_locally_and_no_second_dispatch(self):
+        entered=asyncio.Event()
+        async def pending(request):
+            entered.set()
+            await asyncio.Event().wait()
+        self.response=pending
+        cid=(await self.prepare()).json()['confirmation_id']
+        task=asyncio.create_task(self.execute(cid))
+        await asyncio.wait_for(entered.wait(),2)
+        task.cancel()
+        await asyncio.gather(task,return_exceptions=True)
+        data=(await self.client.get('/api/posts/delete/last',headers=HEADERS)).json()
+        self.assertEqual(data['result']['reason'],'interrupted')
+        self.assertEqual(data['result']['diagnostic']['phase'],'request_dispatch')
+        self.assertEqual(data['result']['outcome'],'uncertain')
+        self.assertEqual((await self.execute(cid)).status_code,409)
+        self.assertEqual(len(self.calls),1)
+
     async def asyncSetUp(self):
         self.calls = []
         self.allowed_targets = {'11_123'}

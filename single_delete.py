@@ -8,12 +8,15 @@ from dataclasses import dataclass, field
 
 from content import identifier, safe_url
 from errors import AppError, MESSAGES
+from graph_api import delete_internal_code
 
 
 CONFIRMATION_TTL = 60
 MAX_CONFIRMATIONS = 200
 MAX_PER_SESSION = 10
 MAX_DIAGNOSTICS = 200
+OBSERVATION_FIELDS = ('content_type','json_parsed','json_type','success_type','has_error_field',
+                      'response_issue','internal_code','phase','request_started')
 
 
 @dataclass
@@ -32,12 +35,25 @@ class SingleDelete:
         self.store, self.queue = store, queue
         self.confirmations = {}
         self.diagnostics = deque(maxlen=MAX_DIAGNOSTICS)
+        self.last_results = {}  # One bounded last attempt per live session; never persisted.
 
     def cleanup(self):
         now = time.monotonic()
         for cid, entry in list(self.confirmations.items()):
             if not entry.active and (entry.expires_at <= now or entry.session_id not in self.store.sessions):
                 del self.confirmations[cid]
+        for sid in list(self.last_results):
+            if sid not in self.store.sessions:
+                del self.last_results[sid]
+
+    def last(self, browser_id, sid):
+        if self.store.session(browser_id,sid) is None:
+            raise AppError('session_expired',401)
+        record=self.last_results.get(sid)
+        if record is None:
+            return {'state':'not_available','message':'Hasil percobaan terakhir tidak tersedia pada sesi/proses ini. Setelah restart, hasil memori lama tidak dapat dipulihkan. Jangan ulang DELETE untuk diagnosis.'}
+        self.store.require_page(browser_id,sid,record['result']['target']['page_id'])
+        return copy.deepcopy(record)
 
     def resolve(self, browser_id, sid, page_id, key):
         session, page = self.store.require_page(browser_id, sid, page_id)
@@ -139,6 +155,11 @@ class SingleDelete:
         scope = self.store.token_key(page.access_token)
         del session, page  # No token retained while waiting for global governor.
         outcome = None
+        observation = {'phase':'graph_dispatch','request_started':False}
+        pending_record = {'state':'processing','result':{'outcome':'processing','reason':'request_in_progress',
+            'target':copy.deepcopy(entry.target),'diagnostic':observation,
+            'message':'Percobaan masih diproses. Pembacaan ini hanya lokal; jangan mengirim ulang DELETE.'}}
+        self.last_results[sid] = pending_record
         def token_at_dispatch():
             if time.monotonic() >= entry.expires_at:
                 raise AppError('confirmation_expired', 409)
@@ -147,20 +168,23 @@ class SingleDelete:
                 raise AppError('post_delete_unsupported', 409)
             return current_page.access_token
         try:
-            outcome = await graph.delete_post_once(entry.target['target_id'], scope, deadline, token_at_dispatch)
+            outcome = await graph.delete_post_once(entry.target['target_id'], scope, deadline, token_at_dispatch, observation)
             if outcome['outcome'] == 'succeeded':
+                observation['phase']='cache_invalidation'
                 self.store.audits.invalidate_post(entry.target['page_id'], entry.target['target_id'])
         except AppError as error:
-            outcome = {'outcome': 'failed', 'reason': error.code, 'http_status': None,
-                       'error_code': None, 'error_subcode': None, 'retry_after': error.retry_after}
+            outcome = {**observation,'outcome': 'uncertain' if observation.get('request_started') else 'failed',
+                       'reason': 'internal_error' if observation.get('request_started') else error.code,
+                       'retry_after': error.retry_after}
+            if observation.get('request_started'):
+                outcome['internal_code']=observation['phase']+'.app_error'
         except asyncio.CancelledError:
             # Client disconnect/cancellation never authorizes retry of this confirmation.
-            outcome = {'outcome':'uncertain', 'reason':'interrupted', 'http_status':None,
-                       'error_code':None, 'error_subcode':None}
+            outcome = {**observation,'outcome':'uncertain', 'reason':'interrupted'}
             raise
-        except Exception:
-            outcome = {'outcome':'uncertain', 'reason':'internal_error', 'http_status':None,
-                       'error_code':None, 'error_subcode':None}
+        except Exception as error:
+            outcome = {**observation,'outcome':'uncertain', 'reason':'internal_error',
+                       'internal_code':delete_internal_code(error,observation['phase'])}
         finally:
             entry.active = False
             self.queue.locks.discard(canonical)
@@ -170,12 +194,21 @@ class SingleDelete:
                           'error_code':outcome.get('error_code') if outcome else None,
                           'error_subcode':outcome.get('error_subcode') if outcome else None,
                           'duration_ms':round((time.monotonic()-started)*1000),
-                          'outcome':outcome['outcome'] if outcome else 'uncertain'}
+                          'outcome':outcome['outcome'] if outcome else 'uncertain',
+                          'reason':outcome['reason'] if outcome else 'interrupted',
+                          **{key:outcome.get(key,observation.get(key)) if outcome else observation.get(key) for key in OBSERVATION_FIELDS}}
             self.diagnostics.append(diagnostic)
-        reason = outcome['reason']
-        message = ('Post berhasil dihapus berdasarkan respons success=true dari Meta.' if outcome['outcome']=='succeeded'
+            reason = outcome['reason']
+            message = ('Post berhasil dihapus berdasarkan respons success=true dari Meta.' if outcome['outcome']=='succeeded'
                    else 'Hasil penghapusan belum dapat dipastikan. Post tetap ditampilkan. Jangan ulang otomatis; periksa Facebook secara manual.' if outcome['outcome']=='uncertain'
                    else 'Batas waktu lokal habis sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.' if reason == 'timeout'
                    else MESSAGES.get(reason, 'Percobaan penghapusan gagal. Post tetap ditampilkan.'))
-        return {**outcome, 'target':entry.target, 'diagnostic':diagnostic, 'message':message,
-                'manual_target_confirmed':True, 'story_automatically_verified':False, 'safe_for_bulk_delete':False}
+            result = {**outcome, 'target':copy.deepcopy(entry.target), 'diagnostic':diagnostic, 'message':message,
+                      'manual_target_confirmed':True, 'story_automatically_verified':False, 'safe_for_bulk_delete':False}
+            if sid in self.store.sessions and self.store.sessions[sid].expires_at > time.monotonic():
+                # Latest start wins; an older completion must not replace a newer attempt.
+                if self.last_results.get(sid) is pending_record:
+                    self.last_results[sid]={'state':'available','result':copy.deepcopy(result)}
+            else:
+                self.last_results.pop(sid,None)
+        return result

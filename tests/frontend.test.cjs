@@ -24,7 +24,8 @@ function setup(responses) {
   const ids = ['facebook-token', 'connect', 'disconnect', 'fanpage', 'page-count', 'availability', 'operation-status',
     'load-posts', 'max-posts', 'content-list', 'select-all', 'selected-count', 'load-status', 'audit-warning', 'local-pagination', 'load-progress',
     'fanpage-search', 'fanpage-search-status', 'source-diagnostics', 'stop-load', 'dry-run', 'dry-status', 'dry-results', 'dry-pagination',
-    'delete-one', 'delete-dialog', 'delete-details', 'delete-manual-check', 'delete-cancel', 'delete-confirm', 'delete-status'];
+    'delete-one', 'delete-dialog', 'delete-details', 'delete-manual-check', 'delete-cancel', 'delete-confirm', 'delete-status',
+    'delete-diagnosis', 'delete-read-last'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id === 'fanpage' ? 'select' : 'div')]));
   elements['max-posts'].value = '100';
   const requests = [];
@@ -50,6 +51,76 @@ const disconnected = {connected: false, state: 'disconnected', pages: [], count:
 const connected = {connected: true, pages: [{id: '11', name: '<img onerror=alert(1)>'}], count: 1,
   message: 'Fanpage berhasil dimuat. Load Posts belum tersedia pada tahap ini.'};
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('safe deletion diagnosis distinguishes uncertain causes and hides old dry report', async () => {
+  for (const reason of ['timeout_after_send','network_after_send','response_unverified','interrupted','internal_error']) {
+    const result={outcome:'uncertain',reason,target:preparedPost.target,message:'Hasil belum dapat dipastikan',
+      diagnostic:{reason,http_status:200,error_code:0,error_subcode:77,duration_ms:123,content_type:'application/json',
+        json_parsed:true,success_type:'string',has_error_field:false,response_issue:'success_not_boolean',
+        internal_code:reason==='internal_error'?'response_headers.runtime_error':null,phase:'response_headers',
+        raw_body:'dummy-page-secret',authorization:'dummy-page-secret'}};
+    const {elements,requests}=setup([connected,onePostAudit(),preparedPost,result]);
+    await tick();
+    await elements['load-posts'].events.click();
+    choose(elements);
+    elements['dry-status'].textContent='Pemeriksaan selesai. Tidak ada konten dihapus.';
+    elements['dry-results'].appendChild(new Element());
+    await elements['delete-one'].events.click();
+    elements['delete-manual-check'].checked=true;
+    await elements['delete-confirm'].events.click();
+    assert.equal(elements['dry-status'].hidden,true);
+    assert.equal(elements['dry-results'].children.length,0);
+    const text=elements['delete-diagnosis'].children.map(child=>child.textContent).join(' ');
+    assert.ok(text.includes(reason));
+    assert.match(text,/HTTP: 200/);
+    assert.match(text,/123 ms/);
+    assert.match(text,/success: string/);
+    assert.doesNotMatch(text,/dummy-page-secret/);
+    assert.equal(elements['content-list'].children.length,1);
+    assert.equal(requests.length,4);
+  }
+});
+
+test('last attempt is read locally without repeating delete and unavailable restart is explicit', async () => {
+  const result={outcome:'uncertain',reason:'network_after_send',target:preparedPost.target,message:'Hasil belum dapat dipastikan',
+    diagnostic:{http_status:null,duration_ms:200,reason:'network_after_send'}};
+  const {elements,requests}=setup([connected,{state:'available',result},
+    {state:'not_available',message:'Hasil tidak tersedia setelah restart; jangan ulang DELETE untuk diagnosis.'}]);
+  await tick();
+  await elements['delete-read-last'].events.click();
+  assert.equal(requests[1].path,'/api/posts/delete/last');
+  const text=elements['delete-diagnosis'].children.map(child=>child.textContent).join(' ');
+  assert.match(text,/network_after_send/);
+  await elements['delete-read-last'].events.click();
+  assert.match(elements['delete-status'].textContent,/restart/);
+  assert.equal(elements['delete-diagnosis'].children.length,0);
+  assert.equal(requests.length,3);
+  assert.ok(requests.every(request=>!request.options.method || request.options.method==='GET'));
+});
+
+test('delayed local read cannot replace diagnosis of a newly started attempt', async () => {
+  let releaseRead, releaseDelete;
+  const {elements,requests}=setup([connected,onePostAudit(),preparedPost,
+    ()=>new Promise(resolve=>{releaseRead=()=>resolve({ok:true,json:async()=>({state:'available',
+      result:{outcome:'uncertain',reason:'timeout_after_send',message:'Diagnosis lama',target:preparedPost.target}})});}),
+    ()=>new Promise(resolve=>{releaseDelete=()=>resolve({ok:true,json:async()=>({outcome:'uncertain',
+      reason:'network_after_send',message:'Diagnosis baru',target:preparedPost.target})});})]);
+  await tick();
+  await elements['load-posts'].events.click();
+  choose(elements);
+  await elements['delete-one'].events.click();
+  const read=elements['delete-read-last'].events.click();
+  elements['delete-manual-check'].checked=true;
+  const execute=elements['delete-confirm'].events.click();
+  releaseRead();
+  await read;
+  assert.doesNotMatch(elements['delete-status'].textContent,/Diagnosis lama/);
+  assert.equal(elements['delete-diagnosis'].children.length,0);
+  releaseDelete();
+  await execute;
+  assert.match(elements['delete-status'].textContent,/Diagnosis baru/);
+  assert.equal(requests.length,5);
+});
 
 function onePostAudit(size = 1) {
   const data = audit(size);

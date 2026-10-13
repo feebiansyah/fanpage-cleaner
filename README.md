@@ -27,7 +27,25 @@ DELETE memakai Page token backend pada header Authorization, AsyncClient bersama
 
 Konfirmasi dibatasi **200 global / 10 per sesi**, dibersihkan saat TTL/sesi habis; metadata tanpa salinan token. Diagnostik aman disimpan **di memori saja, 200 catatan terakhir**, berisi operasi, ID target, HTTP status, kode/subkode numerik terpilih, durasi, dan outcome; tidak ada token/header/exception/response mentah. Tidak ada endpoint untuk melihat diagnostik browser lain. Tombstone sukses dibatasi `MAX_AUDIT_ITEMS` (default 20000), kapasitas diperiksa sebelum dispatch termasuk operasi aktif; TTL `SESSION_TTL + AUDIT_TTL` (default 1500 detik), mencegah snapshot cache/job lama memunculkan target kembali. Semua state ini hilang saat restart; tidak ada pemulihan/retry otomatis single delete.
 
-Pengujian tahap 5 memakai **mock HTTP/token dummy dan DOM/fetch simulasi**. Regresi perbaikan provenance: **136 tes backend dan 38 tes frontend lulus**. Penghapusan Facebook nyata belum dicoba oleh agen; pengguna yang menekan konfirmasi setelah review.
+### Diagnosis hasil uncertain tanpa mengulang penghapusan
+
+Klik **Baca Hasil Hapus Terakhir** untuk membaca `GET /api/posts/delete/last` dari memori backend pemilik sesi saja. Tidak ada GET/DELETE ke Meta, retry penghapusan, atau pemeriksaan ulang objek Facebook. Tidak perlu memilih konten atau menyiapkan konfirmasi untuk membaca diagnosis. Panel menyebut Fanpage/Page ID dan **ID Page Post target**, sehingga hasil Page lain dalam sesi yang sama tidak disalahartikan sebagai target dropdown saat ini.
+
+| Reason | Makna yang dicatat |
+| --- | --- |
+| `timeout_after_send` | Batas waktu request habis setelah percobaan dimulai; bukan bukti apakah Meta sempat menjalankan penghapusan. |
+| `network_after_send` | Gangguan transport/jaringan setelah percobaan dimulai; hasil belum terkonfirmasi. |
+| `response_unverified` | Respons tidak memenuhi kontrak sukses; HTTP 200 saja tetap tidak cukup. |
+| `interrupted` | Pemrosesan terinterupsi/cancelled; hasil uncertain tetap dicatat melalui finally. |
+| `internal_error` | Kegagalan internal dengan kode aman `tahap.kategori`, misalnya `response_headers.runtime_error` atau `cache_invalidation.key_error`. Pesan/traceback/nama class exception mentah tidak disimpan. |
+
+Diagnosis menampilkan **HTTP status, kode/subkode Meta numerik, durasi, reason dan tahap**, serta metadata respons: MIME content-type allowlist tanpa charset/parameter (`other` untuk nilai di luar allowlist), apakah JSON berhasil diparse, tipe root JSON/tipe nilai `success` (tanpa nilainya), dan keberadaan field `error`. `response_issue` menjelaskan bentuk yang gagal: parse JSON, kosong, terlalu besar, bukan object, HTTP non-2xx, field error, success hilang/bukan boolean/bukan true. Nilai yang belum diamati ditampilkan **tidak tersedia**, bukan diasumsikan false. Tidak ada body/header/token/exception mentah di panel atau log aplikasi. Syarat sukses tetap HTTP 2xx + JSON object + success boolean true + tanpa field error.
+
+Hasil terakhir disimpan **satu per sesi aktif**, dibatasi oleh `MAX_SESSIONS` (default 100), sampai disconnect/sesi habis/shutdown. `processing` berarti belum ada hasil akhir; pembacaan tidak mengirim ulang operasi. Jika dua tab memulai target berbeda, percobaan yang dimulai paling baru tetap menjadi hasil terakhir; penyelesaian percobaan lama tidak menimpa hasil baru. Respons baca UI yang terlambat juga tidak mengganti diagnosis operasi baru. Laporan Dry Run lama dibersihkan/disembunyikan ketika hapus nyata dimulai; hasil dry run tetap berarti pemeriksaan lokal saja.
+
+**Setelah restart, hasil lama tidak tersedia dan tidak dapat dipulihkan.** Catatan sebelum perubahan ini tidak mempunyai atribusi sesi/metadata lengkap, sehingga tidak diubah menjadi hasil sesi berdasarkan Page ID atau target yang kebetulan sama. Jangan mengulang DELETE untuk memperoleh diagnosis. Untuk menjelaskan percobaan lama perlu reason/diagnostic aman dari respons lokal yang masih tersimpan; jika tidak ada, penyebab spesifik belum diketahui. Kode/UI yang dulu hanya menampilkan pesan umum bukan bukti timeout sebagai penyebab.
+
+Pengujian tahap 5 memakai **mock HTTP/token dummy dan DOM/fetch simulasi**. Regresi diagnosis: **143 tes backend dan 41 tes frontend lulus**. Tes mencakup bentuk respons, internal error/interrupt, hasil terakhir lokal/isolasi/expiry/restart, balapan percobaan lama/baru, laporan UI dan tidak adanya retry DELETE. Penghapusan Facebook nyata tidak dijalankan oleh agen; diagnosis tidak memerlukan percobaan hapus baru.
 
 ## Tahap 4: antrean dan Dry Run saja
 
@@ -210,6 +228,7 @@ Load Posts aktif setelah sesi dan Fanpage tersedia. Hapus Terpilih tetap nonakti
 | `GET /api/posts?page_id=…` | Hasil audit terakhir dari memori pemilik saja |
 | `POST /api/posts/delete/prepare` | Snapshot satu Post dari key audit, konfirmasi sekali pakai; tanpa Meta |
 | `POST /api/posts/delete/execute` | Satu DELETE v26.0 setelah konfirmasi manual terikat target/sesi |
+| `GET /api/posts/delete/last` | Hasil terakhir/processing dari memori sesi pemilik; tanpa request Meta |
 
 API membutuhkan `X-Fanpage-Client: 1`. POST juga membutuhkan `Origin` persis sama dengan `APP_ORIGIN`. `Sec-Fetch-Site` lintas origin ditolak; host hanya `127.0.0.1`, klien hanya loopback, tanpa CORS wildcard. ID sesi hanya dibaca dari cookie, bukan query/body. Cookie sesi dan browser berisi ID acak opaque 256 bit, `HttpOnly`, `SameSite=Strict`, `Path=/`, tanpa `Domain`. Cookie sesi harus cocok dengan identitas browser pemiliknya.
 

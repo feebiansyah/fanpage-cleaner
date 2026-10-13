@@ -362,6 +362,11 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         payload=await single_delete_body(request)
         return await application.state.single_delete.execute(application.state.graph,request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload)
 
+    @application.get('/api/posts/delete/last')
+    async def last_single_delete(request: Request):
+        check_origin(request,settings)
+        return application.state.single_delete.last(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE))
+
     def owned_dry(request,job_id,mutation=False):
         check_origin(request,settings,mutation=mutation)
         return application.state.bulk.owned(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),job_id)

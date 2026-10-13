@@ -26,6 +26,10 @@
   const deleteCancel = document.getElementById("delete-cancel");
   const deleteConfirm = document.getElementById("delete-confirm");
   const deleteStatus = document.getElementById("delete-status");
+  const deleteDiagnosis = document.getElementById("delete-diagnosis");
+  const readLastButton = document.getElementById("delete-read-last");
+  let readingLast = false;
+  let deleteReportGeneration = 0;
   let deletion = null;
   let deletePreparing = false;
   let deleteExecuting = false;
@@ -86,6 +90,7 @@
     deleteConfirm.disabled = !deletion || !deleteManual.checked || deleteExecuting || Date.now() < cooldownUntil;
     deleteCancel.disabled = deleteExecuting;
     deleteManual.disabled = deleteExecuting;
+    readLastButton.disabled = !ready || busy || !connected || readingLast;
     stopButton.disabled = (!postsLoading && !dryLoading) || stopping;
     stopButton.textContent = dryLoading ? "Berhenti dry run" : postsLoading ? "Berhenti memuat" : "Berhenti";
     maxPosts.disabled = postsLoading || busy;
@@ -182,6 +187,8 @@
   }
 
   function clearAudit() {
+    deleteReportGeneration += 1;
+    deleteDiagnosis.replaceChildren();
     closeDelete();
     deleteSelectionHint = null;
     deleteStatus.textContent = "Pilih tepat satu konten. Backend akan memeriksa ID Page Post sebelum konfirmasi; bulk tetap nonaktif.";
@@ -227,6 +234,9 @@
   }
 
   function renderDry(data) {
+    dryStatus.hidden = false;
+    dryResults.hidden = false;
+    dryPagination.hidden = false;
     lastDryId = data.job_id;
     dryOffset = data.offset || 0;
     const names=(data.pages || []).map(page => page.name).join(", ");
@@ -486,6 +496,68 @@
     deleteDetails.replaceChildren();
   }
 
+  function clearOldDryReport() {
+    cancelDry();
+    lastDryId = null;
+    dryOffset = 0;
+    dryStatus.textContent = "";
+    dryStatus.hidden = true;
+    dryResults.replaceChildren();
+    dryResults.hidden = true;
+    dryPagination.replaceChildren();
+    dryPagination.hidden = true;
+  }
+
+  function renderDeleteResult(result) {
+    deleteStatus.textContent = result.message;
+    deleteDiagnosis.replaceChildren();
+    const diagnostic = result.diagnostic || {};
+    const reason = result.reason || diagnostic.reason || "not_available";
+    const descriptions = {
+      timeout_after_send: "Batas waktu request habis setelah percobaan dimulai; operasi Meta mungkin sudah terjadi.",
+      network_after_send: "Gangguan transport/jaringan setelah percobaan dimulai; hasil operasi Meta belum terkonfirmasi.",
+      response_unverified: "Respons diterima tetapi tidak memenuhi kontrak sukses yang ketat.",
+      interrupted: "Percobaan terinterupsi; hasil tidak boleh diasumsikan berhasil atau diulang otomatis.",
+      internal_error: "Kegagalan internal aplikasi; lihat kode dan tahap diagnosis aman.",
+      success_boolean_true: "Meta mengonfirmasi sukses dengan kontrak respons yang benar.",
+      request_in_progress: "Percobaan masih berjalan di backend; pembacaan ini tidak mengirim request Meta.",
+      token_invalid: "Token ditolak; tidak diulang otomatis.", permission_denied: "Izin ditolak; tidak diulang otomatis.",
+      rate_limited: "Meta membatasi penggunaan; cooldown bersama tetap berlaku.", cooldown: "Cooldown sebelum dispatch.",
+      timeout: "Batas waktu lokal sebelum dispatch.", not_available: "Alasan percobaan belum tersimpan atau tidak tersedia."
+    };
+    const number = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : "tidak tersedia";
+    const flag = value => value === true ? "ya" : value === false ? "tidak" : "tidak tersedia";
+    const target = result.target || {};
+    const lines = [
+      `Fanpage: ${target.page_name || "tidak tersedia"} (Page ${target.page_id || "tidak tersedia"}); target Page Post: ${target.target_id || "tidak tersedia"}.`,
+      `Hasil: ${result.outcome || "tidak tersedia"}; alasan: ${reason}. ${descriptions[reason] || "Lihat status lokal backend; tidak ada retry otomatis."}`,
+      `HTTP: ${number(diagnostic.http_status)}; kode Meta: ${number(diagnostic.error_code)}; subkode: ${number(diagnostic.error_subcode)}; durasi: ${number(diagnostic.duration_ms)} ms.`,
+      `Content-type: ${diagnostic.content_type || "tidak tersedia"}; JSON terparse: ${flag(diagnostic.json_parsed)}; tipe root JSON: ${diagnostic.json_type || "tidak tersedia"}; tipe success: ${diagnostic.success_type || "tidak tersedia"}; field error ada: ${flag(diagnostic.has_error_field)}.`,
+      `Tahap: ${diagnostic.phase || "tidak tersedia"}; masalah respons: ${diagnostic.response_issue || "tidak tersedia"}; kode internal: ${diagnostic.internal_code || "tidak tersedia"}.`
+    ];
+    for (const text of lines) {
+      const line = document.createElement("p");
+      line.textContent = text;
+      deleteDiagnosis.appendChild(line);
+    }
+  }
+
+  readLastButton.addEventListener("click", async () => {
+    if (!ready || !connected || busy || readingLast) return;
+    const generation = deleteGeneration;
+    const reportGeneration = ++deleteReportGeneration;
+    readingLast = true;
+    controls();
+    try {
+      const data = await api("/api/posts/delete/last");
+      if (generation !== deleteGeneration || reportGeneration !== deleteReportGeneration || !connected) return;
+      if (data.result) renderDeleteResult(data.result);
+      else { deleteDiagnosis.replaceChildren(); deleteStatus.textContent = data.message; }
+    } catch (error) {
+      if (generation === deleteGeneration && reportGeneration === deleteReportGeneration) deleteStatus.textContent = error.message;
+    } finally { readingLast = false; controls(); }
+  });
+
   deleteButton.addEventListener("click", async () => {
     const item = onePost();
     if (!ready || !connected || busy || postsLoading || dryLoading || deletePreparing || deleteExecuting || deletion || Date.now() < cooldownUntil || !item) return;
@@ -550,6 +622,9 @@
     const generation = deleteGeneration;
     const pageId = fanpageSelect.value;
     deleteExecuting = true;
+    deleteReportGeneration += 1;
+    clearOldDryReport();
+    deleteDiagnosis.replaceChildren();
     clearTimeout(deleteTimer);
     controls();
     deleteStatus.textContent = "Mengirim satu percobaan penghapusan Post. Tidak ada retry otomatis.";
@@ -571,7 +646,8 @@
         loadStatus.textContent = `Ditampilkan ${loadedAudit.displayed} konten setelah satu Post berhasil dihapus.`;
         renderAuditPage();
       }
-      deleteStatus.textContent = result.message;
+      deleteReportGeneration += 1;
+      renderDeleteResult(result);
     } catch (error) {
       if (!current()) return;
       deleteStatus.textContent = error.code ? error.message : "Hasil penghapusan belum dapat dipastikan karena respons backend tidak diterima. Post tetap ditampilkan; periksa Facebook manual. Tidak ada retry otomatis.";

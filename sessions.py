@@ -255,6 +255,7 @@ class MemoryStore:
         if self.single_delete is not None:
             self.single_delete.confirmations.clear()
             self.single_delete.diagnostics.clear()
+            self.single_delete.last_results.clear()
         if self.content_jobs is not None:
             self.content_jobs.clear()
         for browser in self.browsers.values():

@@ -66,10 +66,12 @@
       <div class="actions">
         <button class="danger" type="button" disabled aria-describedby="availability">Hapus Terpilih</button>
         <button id="delete-one" class="danger" type="button" disabled>Hapus 1 Post</button>
+        <button id="delete-read-last" class="secondary" type="button" disabled>Baca Hasil Hapus Terakhir</button>
         <button id="dry-run" type="button" disabled>Periksa Penghapusan (Dry Run)</button>
         <button id="stop-load" class="secondary" type="button" disabled aria-describedby="load-status">Berhenti</button>
       </div>
       <p id="delete-status" class="help" role="status" aria-live="polite">Pilih tepat satu konten. Backend memeriksa ID Page Post asli; teks/foto/link/video dapat dicoba melalui ID Post. Story teridentifikasi dan bulk tetap ditolak.</p>
+      <div id="delete-diagnosis" class="help" role="status" aria-live="polite" aria-label="Diagnosis aman hasil hapus"></div>
       <p id="dry-status" class="help" role="status" aria-live="polite">Dry run belum berjalan. Tidak ada penghapusan nyata.</p>
       <div id="dry-results" class="help" aria-label="Hasil pemeriksaan target dry run"></div>
       <nav id="dry-pagination" class="local-pagination" aria-label="Halaman hasil dry run lokal"></nav>

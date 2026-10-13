@@ -36,22 +36,47 @@ def retry_after(value: str | None):
         return None
 
 
+def delete_internal_code(error, phase):
+    # Static categories only: exception strings, repr, and class names may contain secrets.
+    category = next((label for kind, label in (
+        (KeyError,'key_error'), (TypeError,'type_error'), (RecursionError,'recursion_error'),
+        (ValueError,'value_error'), (RuntimeError,'runtime_error'), (OSError,'os_error'),
+        (AssertionError,'assertion_error')) if isinstance(error,kind)), 'unexpected_error')
+    return phase+'.'+category
+
+
+def json_value_type(value):
+    if value is None: return 'null'
+    if type(value) is bool: return 'boolean'
+    if type(value) in {int,float}: return 'number'
+    if isinstance(value,str): return 'string'
+    if isinstance(value,dict): return 'object'
+    if isinstance(value,list): return 'array'
+    return 'unavailable'
+
+
 class GraphClient:
     def __init__(self, http: httpx.AsyncClient, settings: Settings, store: MemoryStore):
         self.http = http
         self.settings = settings
         self.store = store
 
-    async def delete_post_once(self, target_id, token_key, deadline, token_at_dispatch):
+    async def delete_post_once(self, target_id, token_key, deadline, token_at_dispatch, observation=None):
         """Strict v26 Page Post contract. One send; never calls the GET retry helper."""
         if not re.fullmatch(r'[0-9]{1,40}(?:_[0-9]{1,40})?', target_id):
             raise AppError('post_delete_unsupported', 409)
-        status, code, subcode, instruction = None, None, None, None
+        observation = observation if observation is not None else {}
+        observation.update(http_status=None,error_code=None,error_subcode=None,content_type=None,
+                           json_parsed=None,json_type=None,success_type='unavailable',has_error_field=None,
+                           response_issue=None,internal_code=None,phase='governor_admission',request_started=False)
+        instruction = None
+        token = ''
         def result(outcome, reason, wait=None):
-            return {'outcome':outcome, 'reason':reason, 'http_status':status,
-                    'error_code':code, 'error_subcode':subcode, 'retry_after':wait}
-        async with self.store.governor.slot(token_key, deadline):
+            return {**observation, 'outcome':outcome, 'reason':reason, 'retry_after':wait}
+        try:
+          async with self.store.governor.slot(token_key, deadline):
             # Session/audit/confirmation may expire while waiting. Fetch token only now.
+            observation['phase']='target_validation'
             token = token_at_dispatch()
             endpoint = 'https://graph.facebook.com/v26.0/'+target_id
             try:
@@ -59,9 +84,15 @@ class GraphClient:
                 if remaining <= 0:
                     raise AppError('confirmation_expired',409)
                 async def send():
-                    nonlocal status, instruction
+                    nonlocal instruction
+                    observation.update(phase='request_dispatch',request_started=True)
                     async with self.http.stream('DELETE', endpoint, headers={'Authorization':'Bearer '+token}) as response:
                         status = response.status_code
+                        observation.update(http_status=status,phase='response_headers')
+                        mime=response.headers.get('content-type','').split(';',1)[0].strip().lower()
+                        # Do not reflect arbitrary header values (or charset/parameters).
+                        observation['content_type'] = (mime if mime in {'application/json','application/problem+json',
+                            'text/html','text/plain','application/octet-stream'} else 'other' if mime else None)
                         self._usage(response.headers, token_key)
                         instruction = retry_after(response.headers.get('retry-after'))
                         if instruction is not None:
@@ -70,13 +101,22 @@ class GraphClient:
                         if status == 429:
                             self.store.cooldown(token_key, max(instruction or 0,self.settings.cooldown_seconds),True)
                         body = bytearray()
+                        observation['phase']='response_body'
                         async for chunk in response.aiter_bytes():
                             if len(body)+len(chunk)>self.settings.max_response_bytes:
+                                observation['response_issue']='response_too_large'
                                 return None
                             body.extend(chunk)
                         try:
-                            return json.loads(body)
+                            observation['phase']='response_parse'
+                            payload=json.loads(body)
+                            observation.update(json_parsed=True,json_type=json_value_type(payload))
+                            if isinstance(payload,dict):
+                                observation['success_type']=json_value_type(payload['success']) if 'success' in payload else 'missing'
+                                observation['has_error_field']='error' in payload
+                            return payload
                         except (ValueError,UnicodeError,RecursionError):
+                            observation.update(json_parsed=False,response_issue='json_parse_failed' if body else 'empty_body')
                             return None
                 payload = await asyncio.wait_for(send(), min(remaining, self.settings.request_timeout))
             except (asyncio.TimeoutError, httpx.TimeoutException):
@@ -85,6 +125,8 @@ class GraphClient:
                 return result('uncertain','network_after_send')
             finally:
                 token = ''
+            observation['phase']='response_classification'
+            status=observation['http_status']
             error = payload.get('error') if isinstance(payload,dict) else None
             if isinstance(error,dict):
                 code = error.get('code') if type(error.get('code')) is int else None
@@ -92,6 +134,9 @@ class GraphClient:
                 # Only bounded numeric diagnostics, never Meta message/type/payload.
                 code = code if code is not None and 0 <= code <= 2147483647 else None
                 subcode = subcode if subcode is not None and 0 <= subcode <= 2147483647 else None
+                observation.update(error_code=code,error_subcode=subcode)
+            else:
+                code=None
             if status==429 or code in {4,17,32,613,80001,80002,80003,80004,80005,80006}:
                 seconds=max(instruction or 0,self.settings.cooldown_seconds)
                 self.store.cooldown(token_key,seconds,global_scope=code!=17)
@@ -105,7 +150,19 @@ class GraphClient:
                 return result('succeeded','success_boolean_true')
             if isinstance(error,dict) and 400 <= status < 500:
                 return result('failed','upstream_error')
+            if observation['response_issue'] is None:
+                observation['response_issue'] = (
+                    'http_not_2xx' if not 200 <= status < 300 else 'json_not_object' if not isinstance(payload,dict)
+                    else 'error_field_present' if 'error' in payload else 'success_missing' if 'success' not in payload
+                    else 'success_not_boolean' if type(payload['success']) is not bool else 'success_not_true')
             return result('uncertain','response_unverified')
+        except AppError:
+            raise
+        except Exception as error:
+            observation['internal_code']=delete_internal_code(error,observation['phase'])
+            return result('uncertain','internal_error')
+        finally:
+            token=''
 
     async def accounts(self, token: str, token_key: str):
         pages = {}
