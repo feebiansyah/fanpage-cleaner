@@ -23,6 +23,11 @@ button.secondary { background: #edf1f6; color: #33445b; border-color: #bac6d6; }
 button:disabled { opacity: .55; cursor: not-allowed; }
 select:disabled { background: #f3f6fa; color: #637185; cursor: not-allowed; }
 input:focus-visible { outline: 3px solid #a6bff4; outline-offset: 2px; }
+button:focus-visible, select:focus-visible { outline: 3px solid #a6bff4; outline-offset: 2px; }
+.connection-summary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 22px; }
+.connection-summary p { margin: 0; }
+.notice[data-kind="error"] { background: #fff0f0; border-color: #e4b9b9; color: #803232; }
+.notice[data-kind="success"] { background: #eef8f1; border-color: #b6d8c1; color: #27593b; }
 .help { color: #637185; font-size: .9rem; }
 #token-help { margin: 8px 0 22px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }

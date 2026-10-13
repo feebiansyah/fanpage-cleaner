@@ -1,0 +1,84 @@
+"""Konfigurasi lokal; tidak membaca atau menyimpan token di file."""
+
+import math
+import os
+import re
+from dataclasses import dataclass, fields
+from urllib.parse import urlsplit
+
+
+@dataclass(frozen=True)
+class Settings:
+    graph_version: str = "v26.0"
+    app_origin: str = "http://127.0.0.1:8000"
+    cookie_secure: bool = False
+    session_ttl: int = 1200
+    browser_ttl: int = 1800
+    max_sessions: int = 100
+    max_browser_entries: int = 512
+    max_token_entries: int = 512
+    cleanup_interval: float = 30
+    local_window: float = 60
+    local_attempts: int = 3
+    global_attempts: int = 12
+    max_jobs: int = 2
+    operation_timeout: float = 30
+    request_timeout: float = 10
+    connect_timeout: float = 5
+    max_connections: int = 4
+    max_keepalive_connections: int = 2
+    max_pages: int = 20
+    page_size: int = 100
+    max_response_bytes: int = 1048576
+    max_body_bytes: int = 16384
+    max_token_length: int = 8192
+    retry_base: float = 0.5
+    retry_jitter: float = 0.25
+    max_retry_wait: float = 5
+    cooldown_seconds: float = 60
+    usage_threshold: float = 90
+
+    def __post_init__(self):
+        if not re.fullmatch(r"v[1-9][0-9]?\.0", self.graph_version):
+            raise ValueError("GRAPH_VERSION harus berformat v26.0.")
+        parsed = urlsplit(self.app_origin)
+        if (parsed.scheme not in {"http", "https"} or parsed.hostname != "127.0.0.1"
+                or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment):
+            raise ValueError("APP_ORIGIN harus berupa origin localhost 127.0.0.1 tanpa path.")
+        try:
+            parsed.port
+        except ValueError:
+            raise ValueError("Port APP_ORIGIN tidak valid.") from None
+        for item in fields(self):
+            value = getattr(self, item.name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                minimum = 0 if item.name == "retry_jitter" else 0.000001
+                if not math.isfinite(value) or value < minimum:
+                    raise ValueError("Konfigurasi angka harus positif dan finite.")
+        if self.max_keepalive_connections > self.max_connections or self.max_jobs > self.max_connections:
+            raise ValueError("Pool harus mencukupi batas pekerjaan/keepalive.")
+        if self.usage_threshold > 100 or self.page_size > 100:
+            raise ValueError("Ambang penggunaan dan ukuran halaman maksimum 100.")
+        if self.browser_ttl < self.session_ttl or self.max_token_length > self.max_body_bytes:
+            raise ValueError("TTL browser/ukuran body harus mencukupi sesi/token.")
+        if self.cookie_secure and parsed.scheme != "https":
+            raise ValueError("COOKIE_SECURE membutuhkan APP_ORIGIN HTTPS.")
+
+    @classmethod
+    def from_env(cls):
+        values = {}
+        for item in fields(cls):
+            raw = os.environ.get(item.name.upper())
+            if raw is None:
+                continue
+            default = item.default
+            try:
+                if isinstance(default, bool):
+                    if raw.lower() not in {"true", "false", "1", "0"}:
+                        raise ValueError()
+                    values[item.name] = raw.lower() in {"true", "1"}
+                else:
+                    values[item.name] = type(default)(raw)
+            except ValueError:
+                raise ValueError("Konfigurasi " + item.name.upper() + " tidak valid.") from None
+        return cls(**values)

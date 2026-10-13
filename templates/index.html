@@ -5,32 +5,38 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fanpage Cleaner</title>
   <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+  <script src="{{ url_for('static', path='/app.js') }}" defer></script>
 </head>
 <body>
   <main class="container">
     <header>
-      <span class="badge">Fondasi aplikasi</span>
+      <span class="badge">Koneksi Fanpage</span>
       <h1>Fanpage Cleaner</h1>
       <p>Kelola konten Fanpage Anda melalui satu halaman.</p>
     </header>
 
-    <p class="notice" id="availability" role="status">Koneksi Facebook belum tersedia pada tahap ini.</p>
+    <p class="notice" id="availability" role="status" aria-live="polite" aria-atomic="true">Memeriksa sesi lokal. JavaScript diperlukan untuk menghubungkan Facebook.</p>
 
     <section class="card" aria-labelledby="connection-title">
       <h2 id="connection-title">Koneksi Facebook</h2>
       <label for="facebook-token">Token Facebook</label>
       <div class="input-row">
-        <input id="facebook-token" type="password" placeholder="Token akses Facebook" autocomplete="off" spellcheck="false" aria-describedby="token-help availability">
-        <button type="button" disabled aria-describedby="availability">Hubungkan</button>
+        <input id="facebook-token" type="password" maxlength="{{ max_token_length }}" placeholder="User access token Facebook" autocomplete="off" spellcheck="false" aria-describedby="token-help availability">
+        <button id="connect" type="button" disabled aria-describedby="availability">Hubungkan</button>
       </div>
-      <p class="help" id="token-help">Token tidak dikirim atau disimpan pada tahap ini.</p>
+      <p class="help" id="token-help">Token dikirim ke backend lokal dan hanya disimpan sementara dalam memori. Jangan bagikan token Anda.</p>
+      <div class="connection-summary">
+        <p id="page-count" class="help">Belum ada sesi aktif.</p>
+        <button id="disconnect" class="secondary" type="button" disabled>Putuskan Koneksi</button>
+      </div>
       <label for="fanpage">Pilihan Fanpage</label>
       <div class="input-row">
         <select id="fanpage" disabled aria-describedby="availability">
           <option value="">Belum ada Fanpage yang terhubung</option>
         </select>
-        <button type="button" disabled aria-describedby="availability">Load Posts</button>
+        <button type="button" disabled aria-describedby="posts-help">Load Posts</button>
       </div>
+      <p class="help" id="posts-help">Load Posts dan penghapusan belum tersedia pada tahap ini. Fanpage yang muncul tidak membuktikan izin menghapus.</p>
     </section>
 
     <section class="card" aria-labelledby="content-title">
@@ -43,7 +49,7 @@
       </div>
       <div class="content-list" aria-label="Daftar konten Fanpage">
         <p>Belum ada konten yang dimuat.</p>
-        <p class="help">Daftar konten dan checkbox tiap konten akan tersedia setelah koneksi Facebook dibuat.</p>
+        <p class="help">Pengambilan konten belum tersedia pada tahap ini.</p>
       </div>
       <div class="actions">
         <button class="danger" type="button" disabled aria-describedby="availability">Hapus Terpilih</button>
@@ -57,7 +63,7 @@
         <span>0%</span>
       </div>
       <progress value="0" max="100" aria-label="Progres operasi">0%</progress>
-      <p class="help" role="status">Belum ada operasi yang berjalan.</p>
+      <p class="help" id="operation-status" role="status" aria-live="polite">Belum ada operasi konten yang berjalan.</p>
     </section>
   </main>
 </body>
