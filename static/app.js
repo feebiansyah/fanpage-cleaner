@@ -112,6 +112,9 @@
     bulkRead.disabled = !ready || !connected || busy || bulkReading || bulkSubmitting || bulkPreparing || Boolean(bulkPrepared) || postsLoading || dryLoading || deleteExecuting;
     stopButton.disabled = (!postsLoading && !dryLoading && !bulkActive()) || stopping || bulkStopping || bulkSubmitting;
     stopButton.textContent = bulkActive() ? "Berhenti penghapusan" : dryLoading ? "Berhenti dry run" : postsLoading ? "Berhenti memuat" : "Berhenti";
+    const deleteHint = !connected ? "Hubungkan Facebook." : deleting || postsLoading || dryLoading || busy ? "Tunggu proses selesai." : Date.now() < cooldownUntil ? "Tunggu jeda API." : !selected.size ? "Pilih konten dahulu." : "";
+    bulkButton.title = bulkButton.disabled ? deleteHint : "";
+    deleteButton.title = deleteButton.disabled ? deleteHint || "Pilih tepat satu Page Post." : "";
     maxPosts.disabled = postsLoading || busy;
     loadButton.textContent = postsLoading ? "Sedang memuat…" : "Load Posts";
     loadStatus.setAttribute("aria-busy", String(postsLoading));
@@ -212,7 +215,7 @@
     closeBulk();
     if (!connected) clearBulk();
     deleteSelectionHint = null;
-    deleteStatus.textContent = "Pilih tepat satu konten. Backend akan memeriksa ID Page Post sebelum konfirmasi; Hapus Terpilih memerlukan konfirmasi manual.";
+    deleteStatus.textContent = "Pilih konten, lalu klik Hapus Terpilih atau Hapus 1 Post.";
     cancelDry();
     dryResults.replaceChildren();
     dryPagination.replaceChildren();
@@ -346,13 +349,13 @@
     for (const error of data.errors || []) applyCooldown(error);
     renderSourceDiagnostics(data.sources);
     const stateText = {running: "Pengambilan bertahap sedang berjalan.", cooldown: "Menunggu cooldown lokal; tidak meminta Meta selama menunggu.",
-      partial: "Pengambilan tidak lengkap; hasil parsial. Pilihan hanya untuk audit.", cancelled: "Pemuatan dihentikan; hasil diterima hanya untuk audit.",
+      partial: "Pengambilan tidak lengkap; hasil parsial.", cancelled: "Pemuatan dihentikan; hasil yang diterima tetap ditampilkan.",
       empty: "Tidak ada konten eligible yang dikembalikan sumber API.", limit_reached: "Batas tampilan tercapai pada kandidat yang dimuat.",
       source_exhausted: "Sumber API yang dipakai sudah habis sebelum batas tercapai."}[data.state] || "Hasil belum dapat dipastikan.";
     const errorSource = {published_posts: "Postingan publik", video_reels: "Reels", stories: "Pemeriksaan Story"}[data.error?.source];
     const counts = Number.isInteger(data.request_count) ? ` Diterima ${data.scanned} item; ${data.request_count} request termasuk retry. ${data.dated_count} bertanggal; ${data.undated_count} tanpa tanggal.` : "";
     loadStatus.textContent = `Ditemukan ${data.found} kandidat unik; ditampilkan ${data.displayed}.${counts} ${stateText}${data.error ? ` ${errorSource ? `${errorSource}: ` : ""}${data.error.message}` : ""}`;
-    auditWarning.textContent = data.warning;
+    auditWarning.textContent = "Daftar mengikuti konten yang tersedia melalui API. Story teridentifikasi dan Reel tanpa ID Page Post yang terverifikasi tidak didukung.";
     loadProgress.setAttribute("value", String(Math.min(100, data.displayed / (data.limit || 1) * 100)));
     renderAuditPage();
   }
@@ -372,7 +375,7 @@
   function updateSelected() {
     if (deletion && (selected.size !== 1 || !selected.has(deletion.target.key))) closeDelete();
     const selectable = loadedAudit?.items.filter(item => item.selectable) || [];
-    selectedCount.textContent = `Terpilih ${selected.size} dari ${selectable.length} konten yang dapat diaudit.`;
+    selectedCount.textContent = `Terpilih ${selected.size} dari ${selectable.length} konten.`;
     selectAll.disabled = !loadedAudit?.bulk_selectable || selectable.length === 0;
     selectAll.checked = selectable.length > 0 && selected.size === selectable.length;
     selectAll.indeterminate = selected.size > 0 && selected.size < selectable.length;
@@ -380,8 +383,8 @@
     if (hint !== deleteSelectionHint && !deleteExecuting && !deletePreparing && !deletion) {
       deleteSelectionHint = hint;
       deleteStatus.textContent = selected.size === 1
-        ? "Klik Hapus 1 Post untuk memeriksa kelayakan ID Page Post di backend. Belum ada DELETE dikirim."
-        : "Pilih tepat satu konten untuk Hapus 1 Post.";
+        ? "Klik Hapus 1 Post atau Hapus Terpilih untuk melanjutkan."
+        : "Pilih konten untuk Hapus Terpilih; pilih satu untuk Hapus 1 Post.";
     }
     controls();
   }
@@ -530,7 +533,8 @@
   }
 
   function renderDeleteResult(result) {
-    deleteStatus.textContent = result.message;
+    const outcome = result.outcome;
+    deleteStatus.textContent = `Proses selesai. Berhasil ${outcome === "succeeded" ? 1 : 0}, gagal ${outcome === "failed" ? 1 : 0}, belum pasti ${outcome === "uncertain" ? 1 : 0}, dihentikan ${outcome === "cancelled" || outcome === "blocked" ? 1 : 0}, tidak didukung ${outcome === "unsupported" ? 1 : 0}.`;
     deleteDiagnosis.replaceChildren();
     const diagnostic = result.diagnostic || {};
     const reason = result.reason || diagnostic.reason || "not_available";
@@ -556,6 +560,9 @@
       `Content-type: ${diagnostic.content_type || "tidak tersedia"}; JSON terparse: ${flag(diagnostic.json_parsed)}; tipe root JSON: ${diagnostic.json_type || "tidak tersedia"}; tipe success: ${diagnostic.success_type || "tidak tersedia"}; field error ada: ${flag(diagnostic.has_error_field)}.`,
       `Tahap: ${diagnostic.phase || "tidak tersedia"}; masalah respons: ${diagnostic.response_issue || "tidak tersedia"}; kode internal: ${diagnostic.internal_code || "tidak tersedia"}.`
     ];
+    for (const key of ["error_message", "error_user_msg"]) {
+      if (typeof diagnostic[key] === "string" && diagnostic[key]) lines.push(`${key}: ${diagnostic[key]}`);
+    }
     if (result.cleanup_warning || diagnostic.cleanup_warning) lines.push("Peringatan cleanup: cache_cleanup_failed. Respons sukses Meta tetap sukses; tampilan target telah diinvalidasi.");
     for (const text of lines) {
       const line = document.createElement("p");
@@ -708,16 +715,18 @@
   function renderBulk(data) {
     bulkJob = data;
     const counts = data.counts || {};
-    bulkStatus.textContent = `${(data.pages || []).map(page => page.name).join(", ")}: ${data.state}; selesai ${data.completed}/${data.total}; dipilih ${data.selected}, target ${data.total}, duplikat ${data.duplicates}. Antrean ${counts.queued || 0}, memproses ${counts.processing || 0}, berhasil ${counts.succeeded || 0}, gagal ${counts.failed || 0}, uncertain ${counts.uncertain || 0}, blocked ${counts.blocked || 0}, dibatalkan ${counts.cancelled || 0}. Penghapusan Page Post; Story belum diverifikasi otomatis seluruhnya.`;
+    const states = {queued:"Menunggu antrean", running:"Penghapusan berjalan", stopping:"Menghentikan proses", completed:"Proses selesai", cancelled:"Proses dihentikan", failed:"Proses selesai", paused_needs_reconnect:"Hubungkan kembali Facebook"};
+    const unsupported = data.unsupported ?? counts.unsupported ?? 0;
+    bulkStatus.textContent = `${(data.pages || []).map(page => page.name).join(", ")}: ${states[data.state] || "Status belum tersedia"}; selesai ${data.completed}/${data.total}. Berhasil ${counts.succeeded || 0}, gagal ${counts.failed || 0}, belum pasti ${counts.uncertain || 0}, dihentikan ${(counts.cancelled || 0) + (counts.blocked || 0)}, tidak didukung ${unsupported}.${data.terminal ? "" : ` Menunggu ${counts.queued || 0}, memproses ${counts.processing || 0}.`}`;
     bulkResults.replaceChildren();
     for (const item of data.items || []) {
       const row = document.createElement("details");
-      const summary = document.createElement("summary"); summary.textContent = `${item.key}: ${item.status}`; row.appendChild(summary);
+      const summary = document.createElement("summary"); summary.textContent = `${item.details?.kind || "Konten"} ${item.delete_target || item.key}: ${{succeeded:"Berhasil",failed:"Gagal",uncertain:"Belum pasti",blocked:"Dihentikan",cancelled:"Dihentikan",queued:"Menunggu",processing:"Memproses",unsupported:"Tidak didukung"}[item.status] || "Belum pasti"}`; row.appendChild(summary);
       bulkTarget(row, item);
       bulkLine(row, `Status: ${item.status}; percobaan: ${item.attempts || 0}; alasan: ${(item.reasons || []).join(", ")}; cleanup: ${item.cleanup_warning || "tidak ada"}.`);
       const diag = item.diagnostic || {};
       // Deliberate allowlist: never dump response bodies, headers or tokens.
-      for (const key of ["reason","http_status","error_code","error_subcode","duration_ms","content_type","json_parsed","json_type","success_type","has_error_field","phase","response_issue","internal_code"])
+      for (const key of ["reason","http_status","error_code","error_subcode","duration_ms","content_type","json_parsed","json_type","success_type","has_error_field","phase","response_issue","internal_code","error_message","error_user_msg"])
         if (diag[key] !== undefined && diag[key] !== null) bulkLine(row, `${key}: ${diag[key]}`);
       bulkResults.appendChild(row);
       if (item.status === "succeeded" && loadedAudit?.page_id === item.page_id) {
@@ -866,7 +875,7 @@
       if (generation === postsGeneration) {
         postsLoading = false;
         activeJob = null;
-        operationStatus.textContent = "Tidak ada penghapusan yang berjalan. Daftar hanya untuk audit.";
+        operationStatus.textContent = "Daftar siap. Pilih konten untuk dihapus.";
       } else if (!activeJob) postsLoading = false;
       controls();
     }

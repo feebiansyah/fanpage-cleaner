@@ -118,7 +118,8 @@ test('delayed local read cannot replace diagnosis of a newly started attempt', a
   assert.equal(elements['delete-diagnosis'].children.length,0);
   releaseDelete();
   await execute;
-  assert.match(elements['delete-status'].textContent,/Diagnosis baru/);
+  assert.match(elements['delete-status'].textContent,/Proses selesai.*belum pasti 1/);
+  assert.match(elements['delete-diagnosis'].children.map(child=>child.textContent).join(' '),/network_after_send/);
   assert.equal(requests.length,5);
 });
 
@@ -799,7 +800,7 @@ test('lost bulk confirmation is never retried and recovers real job with local a
   assert.match(elements['bulk-status'].textContent,/belum pasti/);
   await elements['bulk-read'].events.click();
   assert.equal(requests.filter(r=>r.path==='/api/bulk-delete/confirm').length,1);
-  assert.equal(requests.at(-1).path,'/api/bulk-delete/jobs/active');assert.match(elements['bulk-status'].textContent,/berhasil 1/);
+  assert.equal(requests.at(-1).path,'/api/bulk-delete/jobs/active');assert.match(elements['bulk-status'].textContent,/berhasil 1/i);
 });
 test('bulk unsupported preview cannot confirm; changing Page closes it without enqueue',async()=>{
   const preview={...bulkPreview,supported:0,unsupported:2,items:bulkPreview.items.map(item=>({...item,supported:false}))};
@@ -817,4 +818,38 @@ test('session expiry cancels bulk polling and clears diagnostics without more re
   assert.equal(elements['content-list'].children.length,1);
   timers.find(t=>t.delay===5000).fn();await timers.find(t=>t.delay===1000).fn();
   assert.equal(elements['bulk-results'].children.length,0);assert.equal(elements['load-posts'].disabled,true);assert.equal(requests.length,4);
+});
+
+
+test('completed bulk failures remain visible in neutral summary and safe collapsed diagnostics', async()=>{
+  const mixed={...bulkJob,selected:6,total:5,completed:5,unsupported:1,
+    counts:{queued:0,processing:0,succeeded:1,failed:1,uncertain:1,blocked:1,cancelled:1},
+    items:[{...bulkJob.items[0],status:'failed',diagnostic:{error_message:'<script>alert(1)</script>',error_user_msg:'Izin diperlukan',raw_body:'hidden-secret'}}]};
+  const {elements,requests}=setup([connected,{jobs:[],last_job:mixed}]);
+  await tick();await elements['bulk-read'].events.click();
+  assert.match(elements['bulk-status'].textContent,/Proses selesai.*Berhasil 1, gagal 1, belum pasti 1, dihentikan 2, tidak didukung 1/);
+  assert.doesNotMatch(elements['bulk-status'].textContent,/semua.*berhasil|completed|uncertain|blocked/i);
+  const row=elements['bulk-results'].children[0];
+  assert.equal(row.tag,'details');assert.notEqual(row.open,true);
+  assert.match(row.children.map(child=>child.textContent).join(' '),/<script>alert\(1\)<\/script>/);
+  assert.doesNotMatch(JSON.stringify(row.children),/hidden-secret/);
+  assert.equal(row.children.filter(child=>child.tag==='script').length,0);
+  assert.equal(requests.length,2);
+});
+
+test('single delete safe Meta messages appear only in diagnostic text', async()=>{
+  const result={outcome:'failed',reason:'permission_denied',message:'Long technical error',
+    diagnostic:{error_message:'<img src=x onerror=alert(1)>',error_user_msg:'Periksa izin'}};
+  const {elements}=setup([connected,{result}]);await tick();await elements['delete-read-last'].events.click();
+  assert.match(elements['delete-status'].textContent,/Proses selesai.*gagal 1/);
+  assert.doesNotMatch(elements['delete-status'].textContent,/technical|onerror/);
+  assert.match(elements['delete-diagnosis'].children.map(child=>child.textContent).join(' '),/error_user_msg: Periksa izin/);
+  assert.equal(elements['delete-diagnosis'].children.filter(child=>child.tag==='img').length,0);
+});
+
+test('template separates dry run and collapses detailed diagnosis',()=>{
+  const html=fs.readFileSync('templates/index.html','utf8');
+  assert.match(html,/<details><summary>Detail hasil penghapusan<\/summary>/);
+  assert.match(html,/<details><summary>Pemeriksaan lokal \(Dry Run\)<\/summary>/);
+  assert.doesNotMatch(html,/Penghapusan massal tetap nonaktif|Daftar hanya untuk audit/);
 });

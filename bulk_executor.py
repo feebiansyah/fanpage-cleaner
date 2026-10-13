@@ -42,7 +42,7 @@ class PagePostExecutor:
             if job.stop_requested or job.terminal:
                 raise AppError('bulk_dispatch_stopped',409)
             reason=q.block_reason(target)
-            if reason: raise AppError('bulk_token_blocked' if reason=='token_invalid' else 'bulk_page_blocked',403)
+            if reason: raise AppError('bulk_token_blocked' if reason=='token_invalid' else reason if reason in {'permission_circuit_open','permission_circuit_capacity'} else 'bulk_page_blocked',403)
             _,page=q.store.require_page(job.browser_id,job.session_id,target.page_id)
             if not page.access_token: raise AppError('page_token_missing',403)
             if (q.store.audits.removed_posts.get((target.page_id,target.delete_target),0)>time.monotonic()):
@@ -58,12 +58,14 @@ class PagePostExecutor:
             del page,session
             result=await self.graph.delete_post_once(target.delete_target,target.scope,deadline,token_at_dispatch,observation)
             status,reason=result['outcome'],result['reason']
+            if result.get('request_started'):
+                q.record_delete_outcome(target,reason)
             if status=='succeeded':
                 target.cleanup_warning=invalidate_confirmed_post(q.store,target.page_id,target.delete_target)
                 if target.cleanup_warning: target.reasons.append(target.cleanup_warning)
         except AppError as error:
             reason=q.block_reason(target) or error.code
-            status='blocked' if reason in {'token_invalid','permission_denied','page_token_missing','bulk_target_deleted'} else 'cancelled' if job.stop_requested or reason in {'session_expired','bulk_dispatch_stopped'} else 'queued' if reason in {'cooldown','rate_limited'} and not observation.get('request_started') else 'failed'
+            status='blocked' if reason in {'token_invalid','permission_denied','permission_circuit_open','permission_circuit_capacity','page_token_missing','bulk_target_deleted'} else 'cancelled' if job.stop_requested or reason in {'session_expired','bulk_dispatch_stopped'} else 'queued' if reason in {'cooldown','rate_limited'} and not observation.get('request_started') else 'failed'
             result={**observation,'outcome':status,'reason':reason,'retry_after':error.retry_after}
         except asyncio.CancelledError:
             reason=q.block_reason(target) or job.stop_reason or 'interrupted'

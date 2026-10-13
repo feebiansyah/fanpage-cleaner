@@ -124,6 +124,15 @@ class MemoryStore:
     def token_key(self, token: str):
         return hmac.new(self._salt, token.encode("ascii"), hashlib.sha256).hexdigest()
 
+    def known_tokens(self):
+        # Temporary caller-owned set only; never persist or expose these credentials.
+        tokens=set()
+        for session in self.sessions.values():
+            tokens.add(session.user_token)
+            tokens.update(page.access_token for page in session.pages)
+        tokens.discard('')
+        return tokens
+
     def check_cooldown(self, token_key: str):
         until = max(self.global_cooldown_until, self.token_cooldowns.get(token_key, 0))
         remaining = math.ceil(until - time.monotonic())

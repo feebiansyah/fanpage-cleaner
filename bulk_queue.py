@@ -20,6 +20,7 @@ class DryJob:
     duplicates: int
     pages: dict
     mode: str = 'dry_run'
+    unsupported: int = 0
     stop_requested: bool = False
     stop_reason: str = ''
     final_stop_state: str = 'cancelled'
@@ -46,6 +47,9 @@ class BulkQueue:
         self.blocked_pages={}
         self.blocked_scopes={}
         self.success_reservations=set()
+        self.permission_denials={}
+        self.permission_circuits={}
+        self.permission_capacity_until=0
 
     def record(self,job):
         return {'version':1,'job_id':job.id,'owner_id':job.owner_id,'created_at':job.created_at,
@@ -83,6 +87,8 @@ class BulkQueue:
         now=time.monotonic()
         self.blocked_pages={k:v for k,v in self.blocked_pages.items() if v>now}
         self.blocked_scopes={k:v for k,v in self.blocked_scopes.items() if v>now}
+        self.permission_circuits={k:v for k,v in self.permission_circuits.items() if v>now}
+        self.permission_denials={k:v for k,v in self.permission_denials.items() if v and v[-1]>now-self.settings.delete_permission_window}
         for job in list(self.jobs.values()):
             if not job.terminal and not job.stop_requested and (job.session_id not in self.store.sessions or job.expires_at<=now):
                 self.pause(job,'session_expired' if job.session_id not in self.store.sessions else 'queue_duration_limit')
@@ -115,7 +121,7 @@ class BulkQueue:
         except AppError: pass
         self.changed.set()
 
-    def add(self,browser_id,sid,targets,duplicates,pages,mode='dry_run'):
+    def add(self,browser_id,sid,targets,duplicates,pages,mode='dry_run',unsupported=0):
         self.sync_sessions()
         if self.store.session(browser_id,sid) is None:
             raise AppError('session_expired',401)
@@ -128,6 +134,7 @@ class BulkQueue:
         owner=self.owners.setdefault(sid,uuid.uuid4().hex)
         job=DryJob(uuid.uuid4().hex,owner,browser_id,sid,time.time(),time.monotonic()+self.settings.dry_job_ttl,targets,duplicates,pages)
         job.mode=mode
+        job.unsupported=unsupported
         self.persist(job)  # No job admitted/dispatched if atomic checkpoint failed.
         self.jobs[job.id]=job
         for index,target in enumerate(targets):
@@ -254,7 +261,7 @@ class BulkQueue:
         if job.mode=='delete_page_posts':
             counts={s:sum(t.status==s for t in job.targets) for s in ('queued','processing','succeeded','failed','uncertain','blocked','cancelled')}
             return {'job_id':job.id,'mode':job.mode,'state':job.state,'terminal':job.terminal,
-                    'total':len(job.targets),'selected':len(job.targets)+job.duplicates,'duplicates':job.duplicates,
+                    'total':len(job.targets),'selected':len(job.targets)+job.duplicates+job.unsupported,'duplicates':job.duplicates,'unsupported':job.unsupported,
                     'counts':counts,'completed':len(job.targets)-counts['queued']-counts['processing'],
                     'succeeded':counts['succeeded'],'manual_targets_confirmed':True,'story_automatically_verified':False,
                     'pages':[{'page_id':pid,'name':name} for pid,name in job.pages.items()],
@@ -272,8 +279,29 @@ class BulkQueue:
 
     def block_reason(self,target):
         if target.scope in self.blocked_scopes: return 'token_invalid'
+        if self.permission_capacity_until>time.monotonic(): return 'permission_circuit_capacity'
         if (target.page_id,target.scope) in self.blocked_pages: return 'permission_denied'
+        if (target.page_id,target.scope) in self.permission_circuits: return 'permission_circuit_open'
         return None
+
+    def record_delete_outcome(self,target,reason):
+        key=(target.page_id,target.scope)
+        if reason=='token_invalid':
+            self.block_related(target,reason)
+        elif reason=='success_boolean_true':
+            self.permission_denials.pop(key,None)
+        elif reason=='permission_denied':
+            now=time.monotonic()
+            if key not in self.permission_denials and len(self.permission_denials)>=self.settings.max_token_entries:
+                self.block_related(target,'permission_circuit_capacity')
+                return
+            denials=self.permission_denials.setdefault(key,deque())
+            while denials and denials[0]<=now-self.settings.delete_permission_window:
+                denials.popleft()
+            denials.append(now)
+            if len(denials)>=self.settings.delete_permission_threshold:
+                self.permission_denials.pop(key,None)
+                self.block_related(target,'permission_circuit_open')
 
     def _cancel_unsent(self,job):
         for target in job.targets:
@@ -305,9 +333,17 @@ class BulkQueue:
         self.changed.set()
 
     def block_related(self,target,reason):
+        if reason not in {'token_invalid','permission_circuit_open','permission_circuit_capacity'}:
+            return  # Generic target permission failures never establish a Page-wide denial.
         expiry=time.monotonic()+self.settings.dry_job_ttl
         if reason=='token_invalid': self.blocked_scopes[target.scope]=expiry
-        else: self.blocked_pages[(target.page_id,target.scope)]=expiry
+        elif reason=='permission_circuit_open':
+            key=(target.page_id,target.scope)
+            if key not in self.permission_circuits and len(self.permission_circuits)>=self.settings.max_token_entries:
+                reason='permission_circuit_capacity'
+                self.permission_capacity_until=time.monotonic()+self.settings.delete_permission_window
+            else: self.permission_circuits[key]=time.monotonic()+self.settings.delete_permission_window
+        elif reason=='permission_circuit_capacity': self.permission_capacity_until=time.monotonic()+self.settings.delete_permission_window
         for job in self.jobs.values():
             if job.mode!='delete_page_posts' or job.terminal: continue
             for other in job.targets:
@@ -323,8 +359,6 @@ class BulkQueue:
             except AppError: pass
 
     def release_real(self,job,target,index,outcome):
-        if outcome.reason in {'permission_denied','token_invalid'}:
-            self.block_related(target,outcome.reason)
         if target.status=='processing':
             target.status=outcome.status
             if outcome.reason not in target.reasons: target.reasons.append(outcome.reason)

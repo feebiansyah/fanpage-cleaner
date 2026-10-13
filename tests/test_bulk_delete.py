@@ -30,6 +30,101 @@ def post(n, page='11', **changes):
 
 
 class BulkDelete(unittest.IsolatedAsyncioTestCase):
+    async def test_message_sanitization_bounds_controls_and_unknown_bearer_header(self):
+        from graph_api import sanitized_meta_message
+        value=sanitized_meta_message('Authorization: Bearer UNTRACKED_EXAMPLE\n\x00'+TOKEN,{TOKEN})
+        self.assertNotIn('UNTRACKED_EXAMPLE',value)
+        self.assertNotIn(TOKEN,value)
+        self.assertNotIn('\x00',value)
+        self.assertIsNone(sanitized_meta_message({'message':TOKEN},{TOKEN}))
+        long_token='x'*700
+        value=sanitized_meta_message('a'*400+' '+long_token,{long_token})
+        self.assertLessEqual(len(value),500)
+        self.assertNotIn('x',value)
+        self.assertNotIn(TOKEN,sanitized_meta_message('a'*8192+TOKEN,{TOKEN}))
+
+    async def test_permission_window_is_rolling_and_success_resets_it(self):
+        from types import SimpleNamespace
+        queue=self.app.state.bulk
+        target=SimpleNamespace(page_id='11',scope='dummy-scope')
+        base=time.monotonic()
+        for elapsed in (0,59,118):
+            with patch('bulk_queue.time.monotonic',return_value=base+elapsed):
+                queue.record_delete_outcome(target,'permission_denied')
+        self.assertEqual(queue.permission_circuits,{})
+        with patch('bulk_queue.time.monotonic',return_value=base+119):
+            queue.record_delete_outcome(target,'success_boolean_true')
+            queue.record_delete_outcome(target,'permission_denied')
+        self.assertEqual(queue.permission_circuits,{})
+        for elapsed in (120,121):
+            with patch('bulk_queue.time.monotonic',return_value=base+elapsed):
+                queue.record_delete_outcome(target,'permission_denied')
+        self.assertIn(('11','dummy-scope'),queue.permission_circuits)
+
+    async def test_permission_breaker_memory_capacity_fails_closed(self):
+        from dataclasses import replace
+        from types import SimpleNamespace
+        queue=self.app.state.bulk
+        queue.settings=replace(queue.settings,max_token_entries=1)
+        one=SimpleNamespace(page_id='11',scope='one')
+        two=SimpleNamespace(page_id='22',scope='two')
+        queue.record_delete_outcome(one,'permission_denied')
+        queue.record_delete_outcome(two,'permission_denied')
+        self.assertLessEqual(len(queue.permission_denials),1)
+        self.assertEqual(queue.block_reason(two),'permission_circuit_capacity')
+        self.assertEqual(self.calls,[])
+
+    async def test_job_preserves_unsupported_count_from_confirmed_preview(self):
+        self.seed([post(1),post(2,kind='Story')])
+        result=await self.finished(await self.start(2))
+        self.assertEqual(result['unsupported'],1)
+        self.assertEqual(result['selected'],2)
+        self.assertEqual(result['total'],1)
+        self.assertEqual(result['counts']['succeeded'],1)
+    async def test_generic_permission_is_per_target_and_later_post_continues(self):
+        self.store.governor.interval=.03
+        self.responses['11_3']=httpx.Response(403,json={'error':{'code':200,'error_subcode':77,
+            'message':'One object cannot be deleted','error_user_msg':'Periksa target ini'}})
+        result=await self.finished(await self.start(4))
+        self.assertEqual(result['counts']['succeeded'],3)
+        self.assertEqual(result['counts']['failed'],1)
+        self.assertEqual(result['counts']['blocked'],0)
+        diagnostic=next(row['diagnostic'] for row in result['items'] if row['status']=='failed')
+        self.assertEqual(diagnostic['error_code'],200)
+        self.assertEqual(diagnostic['error_subcode'],77)
+        self.assertEqual(diagnostic['error_message'],'One object cannot be deleted')
+
+    async def test_repeated_permission_opens_circuit_not_page_permission_claim(self):
+        self.store.governor.interval=.03
+        self.response=httpx.Response(403,json={'error':{'code':200,'message':'Object denied'}})
+        result=await self.finished(await self.start(20))
+        self.assertEqual(len(self.calls),3)
+        self.assertEqual(result['counts']['failed'],3)
+        self.assertEqual(result['counts']['blocked'],17)
+        self.assertTrue(all('permission_circuit_open' in row['reasons'] for row in result['items'] if row['status']=='blocked'))
+        queue=self.app.state.bulk
+        queue.permission_circuits={key:time.monotonic()-1 for key in queue.permission_circuits}
+        queue.sync_sessions()
+        self.response=httpx.Response(200,json={'success':True})
+        new=await self.finished(await self.start(selections=[{'page_id':'11','keys':[post(4)['key']]}]))
+        self.assertEqual(new['counts']['succeeded'],1)
+        self.assertEqual((await self.snapshot(result['job_id']))['counts']['blocked'],17)
+
+    async def test_meta_messages_redact_all_sessions_tokens_and_urls_before_truncating(self):
+        bid,_,_=self.store.bootstrap(None)
+        foreign='dummy-foreign-secret'
+        self.store.replace(bid,foreign,[Page('33','Foreign',foreign)])
+        message=f'{TOKEN} {OTHER_TOKEN} dummy-bulk-user-secret {foreign} https://graph.facebook.com/x?access_token={TOKEN}\n<script>visible as text</script>'
+        self.response=httpx.Response(403,json={'error':{'code':200,'message':message,'error_user_msg':message}})
+        result=await self.finished(await self.start(1))
+        diag=result['items'][0]['diagnostic']
+        for key in ('error_message','error_user_msg'):
+            self.assertIsInstance(diag[key],str)
+            self.assertLessEqual(len(diag[key]),500)
+            self.assertNotIn('https://',diag[key])
+        for secret in (TOKEN,OTHER_TOKEN,'dummy-bulk-user-secret',foreign):
+            self.assertNotIn(secret,json.dumps(result))
+
     async def test_slow_checkpoint_cannot_dispatch_after_deadline(self):
         from errors import AppError
         def slow_preflight():
@@ -51,7 +146,7 @@ class BulkDelete(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repeated.json()['job_id'], jid)
         self.assertEqual(len(self.calls), 5)
 
-    async def test_single_permission_denial_blocks_bulk_same_scope_only(self):
+    async def test_single_generic_denial_does_not_block_other_bulk_targets(self):
         self.response = httpx.Response(403, json={'error': {'code': 10}})
         preview = await self.client.post('/api/posts/delete/prepare', headers=HEADERS,
                     json={'page_id':'11','keys':[post(1)['key']]})
@@ -62,9 +157,9 @@ class BulkDelete(unittest.IsolatedAsyncioTestCase):
         job = await self.finished(await self.start(selections=[
             {'page_id':'11','keys':[post(2)['key']]},
             {'page_id':'22','keys':[post(1,'22')['key']]}]))
-        self.assertEqual(job['counts']['blocked'], 1)
-        self.assertEqual(job['counts']['succeeded'], 1)
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(job['counts']['blocked'], 0)
+        self.assertEqual(job['counts']['succeeded'], 2)
+        self.assertEqual(len(self.calls), 3)
 
     async def test_checkpoint_failure_does_not_finish_before_sent_response(self):
         entered, release = asyncio.Event(), asyncio.Event()
@@ -357,7 +452,7 @@ class BulkDelete(unittest.IsolatedAsyncioTestCase):
         times = sorted(moment for _, moment in self.calls)
         self.assertTrue(all(b-a >= .020 for a, b in zip(times, times[1:])), times)
 
-    async def test_permission_failure_blocks_only_affected_page(self):
+    async def test_generic_permission_failure_allows_other_targets_and_page(self):
         self.store.governor.interval = .03
         self.responses['11_1'] = httpx.Response(403, json={'error': {'code': 10, 'message': TOKEN}})
         groups = [{'page_id': page, 'keys': [post(n, page)['key'] for n in range(1, 4)]}
@@ -366,7 +461,8 @@ class BulkDelete(unittest.IsolatedAsyncioTestCase):
         first = [row for row in result['items'] if row['page_id'] == '11']
         second = [row for row in result['items'] if row['page_id'] == '22']
         self.assertEqual(sum(row['status'] == 'failed' for row in first), 1)
-        self.assertEqual(sum(row['status'] == 'blocked' for row in first), 2)
+        self.assertEqual(sum(row['status'] == 'blocked' for row in first), 0)
+        self.assertEqual(sum(row['status'] == 'succeeded' for row in first), 2)
         self.assertTrue(all(row['status'] == 'succeeded' for row in second))
         self.assertEqual(sum(request.url.path == '/v26.0/11_1' for request, _ in self.calls), 1)
         self.assertNotIn(TOKEN, json.dumps(result))

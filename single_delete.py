@@ -17,7 +17,7 @@ MAX_CONFIRMATIONS = 200
 MAX_PER_SESSION = 10
 MAX_DIAGNOSTICS = 200
 OBSERVATION_FIELDS = ('content_type','json_parsed','json_type','success_type','has_error_field',
-                      'response_issue','internal_code','phase','request_started')
+                      'response_issue','internal_code','phase','request_started','error_message','error_user_msg')
 
 
 @dataclass
@@ -167,15 +167,17 @@ class SingleDelete:
             _, current_page, _, current_identity = self.resolve(browser_id, sid, entry.target['page_id'], entry.target['key'])
             current_scope=self.store.token_key(current_page.access_token)
             if current_scope in self.queue.blocked_scopes: raise AppError('token_invalid',401)
+            if self.queue.permission_capacity_until>time.monotonic(): raise AppError('permission_circuit_capacity',429)
             if (entry.target['page_id'],current_scope) in self.queue.blocked_pages: raise AppError('permission_denied',403)
+            if (entry.target['page_id'],current_scope) in self.queue.permission_circuits: raise AppError('permission_circuit_open',429)
             if current_identity != entry.identity:
                 raise AppError('post_delete_unsupported', 409)
             return current_page.access_token
         try:
             outcome = await graph.delete_post_once(entry.target['target_id'], scope, deadline, token_at_dispatch, observation)
-            if outcome['reason'] in {'permission_denied','token_invalid'}:
+            if outcome.get('request_started'):
                 from types import SimpleNamespace
-                self.queue.block_related(SimpleNamespace(page_id=entry.target['page_id'],scope=scope),outcome['reason'])
+                self.queue.record_delete_outcome(SimpleNamespace(page_id=entry.target['page_id'],scope=scope),outcome['reason'])
             if outcome['outcome'] == 'succeeded':
                 observation['phase']='cache_invalidation'
                 outcome['cleanup_warning']=invalidate_confirmed_post(self.store,entry.target['page_id'],entry.target['target_id'])

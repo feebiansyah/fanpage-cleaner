@@ -18,6 +18,7 @@ class BulkConfirmation:
     targets: list
     pages: dict
     duplicates: int
+    unsupported: int = 0
     job_id: str | None = None
 
 
@@ -84,7 +85,8 @@ class BulkDelete:
                 items.append({**detail,'supported':True,'reason':None,'message':'Target Page Post; objek media terpisah tidak dijamin ikut dihapus.'})
         cid=secrets.token_urlsafe(32)
         expires=min(session.expires_at,time.monotonic()+CONFIRMATION_TTL)
-        self.confirmations[cid]=BulkConfirmation(browser_id,sid,expires,targets,pages,duplicates)
+        unsupported=sum(not i['supported'] for i in items)
+        self.confirmations[cid]=BulkConfirmation(browser_id,sid,expires,targets,pages,duplicates,unsupported)
         return {'confirmation_id':cid,'expires_in_seconds':max(0,int(expires-time.monotonic())),
             'selected':total,'supported':len(targets),'unsupported':sum(not i['supported'] for i in items),
             'duplicates':duplicates,'items':items,'max_targets':self.store.settings.bulk_delete_max_targets,
@@ -107,7 +109,7 @@ class BulkDelete:
             if not page.access_token: raise AppError('page_token_missing',403)
             target.scope=self.store.token_key(page.access_token)
         # Atomic enqueue + consumption, without await. No cache lookup: confirmed snapshot owns IDs.
-        job=self.queue.add(browser_id,sid,copy.deepcopy(entry.targets),entry.duplicates,dict(entry.pages),'delete_page_posts')
+        job=self.queue.add(browser_id,sid,copy.deepcopy(entry.targets),entry.duplicates,dict(entry.pages),'delete_page_posts',entry.unsupported)
         entry.job_id=job.id
         return self.queue.snapshot(job)
 

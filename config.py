@@ -56,6 +56,8 @@ class Settings:
     max_audit_pages: int = 200
     dry_workers: int = 2
     bulk_delete_max_targets: int = 20
+    delete_permission_threshold: int = 3
+    delete_permission_window: float = 60
     graph_request_concurrency: int = 2
     graph_request_interval: float = 1
     graph_max_interval: float = 10
@@ -71,6 +73,8 @@ class Settings:
     checkpoint_retention: float = 604800
 
     def __post_init__(self):
+        if type(self.delete_permission_threshold) is not int or not 1 <= self.delete_permission_threshold <= 20:
+            raise ValueError('Ambang circuit breaker harus bilangan bulat 1–20.')
         if type(self.bulk_delete_max_targets) is not int or not 1 <= self.bulk_delete_max_targets <= 20:
             raise ValueError('Batas uji bulk harus bilangan bulat 1–20; bukan batas Meta.')
         if not re.fullmatch(r"v[1-9][0-9]?\.0", self.graph_version):

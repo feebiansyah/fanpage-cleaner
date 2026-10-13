@@ -1,4 +1,4 @@
-"""Shared bounded GET transport. Never follow upstream URLs or expose Meta messages."""
+"""Shared bounded transport. Only sanitized, bounded DELETE error messages may be exposed."""
 
 import asyncio
 import hashlib
@@ -9,7 +9,7 @@ import re
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, quote, quote_plus
 from contextlib import asynccontextmanager
 
 import httpx
@@ -17,6 +17,22 @@ import httpx
 from config import Settings
 from errors import AppError
 from sessions import MemoryStore, Page
+
+
+def sanitized_meta_message(value, tokens):
+    if not isinstance(value,str): return None
+    if len(value)>8192: return '[Pesan Meta terlalu panjang; tidak ditampilkan]'
+    # Redact before truncating so a long credential never becomes a leaked prefix.
+    secrets=set()
+    for token in tokens:
+        if token: secrets.update((token,quote(token,safe=''),quote_plus(token)))
+    for secret in sorted(secrets,key=len,reverse=True):
+        value=value.replace(secret,'[disamarkan]')
+    value=re.sub(r'(?i)(?:[a-z][a-z0-9+.-]*://|www\.)[^\s<>\"\']+', '[URL disamarkan]',value)
+    value=re.sub(r'(?i)\b(?:access_token|authorization|token)\s*[:=]\s*(?:Bearer\s+)?[^\s,;]+','[credential disamarkan]',value)
+    value=re.sub(r'(?i)\bBearer\s+[^\s,;]+','[credential disamarkan]',value)
+    value=' '.join(''.join(c if c.isprintable() else ' ' for c in value).split())
+    return value[:500] or None
 
 
 def retry_after(value: str | None):
@@ -71,6 +87,7 @@ class GraphClient:
                            response_issue=None,internal_code=None,phase='governor_admission',request_started=False)
         instruction = None
         token = ''
+        known_tokens = self.store.known_tokens()
         def result(outcome, reason, wait=None):
             return {**observation, 'outcome':outcome, 'reason':reason, 'retry_after':wait}
         try:
@@ -114,6 +131,11 @@ class GraphClient:
                             if isinstance(payload,dict):
                                 observation['success_type']=json_value_type(payload['success']) if 'success' in payload else 'missing'
                                 observation['has_error_field']='error' in payload
+                                error=payload.get('error')
+                                if isinstance(error,dict):
+                                    redactions=known_tokens | self.store.known_tokens() | {token}
+                                    observation['error_message']=sanitized_meta_message(error.get('message'),redactions)
+                                    observation['error_user_msg']=sanitized_meta_message(error.get('error_user_msg'),redactions)
                             return payload
                         except (ValueError,UnicodeError,RecursionError):
                             observation.update(json_parsed=False,response_issue='json_parse_failed' if body else 'empty_body')
@@ -125,6 +147,7 @@ class GraphClient:
                 return result('uncertain','network_after_send') if observation['request_started'] else result('failed','network_before_send')
             finally:
                 token = ''
+                known_tokens.clear()
             observation['phase']='response_classification'
             status=observation['http_status']
             error = payload.get('error') if isinstance(payload,dict) else None

@@ -1,6 +1,8 @@
 """Error tetap: tidak pernah menyertakan input, exception, atau pesan Meta."""
 
 MESSAGES = {
+    'permission_circuit_capacity': 'Dispatch dihentikan sementara karena kapasitas catatan penolakan lokal penuh; bukan penolakan izin seluruh Page. Target belum dikirim perlu konfirmasi pekerjaan baru setelah jeda.',
+    'permission_circuit_open': 'Pengiriman pada Page/token ini dijeda setelah penolakan berulang. Ini bukan bukti seluruh Page kehilangan izin. Target belum dikirim perlu konfirmasi pekerjaan baru setelah jeda.',
     "timeout_before_send": "Batas waktu habis sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.",
     "network_before_send": "Transport gagal sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.",
     "bulk_limit": "Batas uji lokal penghapusan bulk maksimal 20 pilihan per konfirmasi (atau batas konfigurasi yang lebih kecil). Ini bukan batas Meta.",
@@ -13,7 +15,7 @@ MESSAGES = {
     "bulk_target_deleted": "Page Post ini sudah dikonfirmasi berhasil dihapus oleh operasi lain; tidak dikirim ulang.",
     "invalid_single_delete": "Pilih tepat satu key Post audit; ID atau token bebas tidak diterima.",
     "post_delete_unsupported": "Snapshot target berubah setelah preview. Periksa ulang target sebelum menyiapkan konfirmasi baru.",
-    "page_post_missing": "Konten tidak memiliki ID Page Post asli dari published_posts pada hasil audit. Reel tanpa Page Post terhubung tidak didukung; ID media/Reel tidak dipakai sebagai pengganti.",
+    "page_post_missing": "Konten tidak memiliki ID Page Post asli dari published_posts. Penghapusan objek Reel/video melalui ID media aslinya belum terverifikasi; ID tersebut tidak dicoba sebagai pengganti ID Post.",
     "post_identity_ambiguous": "Identitas Page Post atau relasi Post/Reel ambigu. Tidak ada target yang ditebak atau ID yang diubah.",
     "identified_story": "Story teridentifikasi. Target ini tidak dapat dicoba melalui Hapus 1 Post.",
     "post_permalink_missing": "Permalink Facebook valid tidak tersedia. Pemeriksaan manual target tidak dapat dilakukan.",
@@ -40,7 +42,7 @@ MESSAGES = {
     "audit_capacity": "Kapasitas hasil audit dalam memori penuh. Kurangi maksimal postingan atau tunggu hasil kedaluwarsa.",
     "token_empty": "Token Facebook kosong. Masukkan user access token.",
     "token_invalid": "Token Facebook tidak valid atau sudah kedaluwarsa.",
-    "permission_denied": "Akses atau izin Facebook ditolak. Periksa izin aplikasi dan akses Fanpage.",
+    "permission_denied": "Facebook menolak akses atau operasi pada target ini. Lihat detail pesan; satu penolakan bukan bukti seluruh Fanpage kehilangan izin.",
     "network_error": "Gangguan jaringan saat menghubungi Facebook. Coba lagi nanti.",
     "timeout": "Waktu koneksi habis. Daftar Fanpage belum berhasil dimuat.",
     "upstream_error": "Facebook mengembalikan respons yang tidak dapat digunakan. Coba lagi nanti.",
