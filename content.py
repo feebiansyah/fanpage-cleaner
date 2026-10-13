@@ -34,7 +34,9 @@ def publication_date(value):
             return datetime.fromtimestamp(value, timezone.utc)
         if not isinstance(value, str) or len(value) > 64:
             return None
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Graph commonly uses +0000; Python 3.10 requires +00:00.
+        value = re.sub(r"([+-][0-9]{2})([0-9]{2})$", r"\1:\2", value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
         return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
     except (ValueError, OverflowError, OSError):
         return None
@@ -109,15 +111,19 @@ class ContentLoader:
     def __init__(self, graph, store, settings):
         self.graph, self.store, self.settings = graph, store, settings
 
-    async def _fetch(self, source, page, token_key, secrets, size, deadline, guard):
+    async def _fetch(self, source, page, token_key, secrets, size, deadline, guard, on_request=None):
         guard()
         if source.page_count >= self.settings.posts_max_pages:
             raise stop_error("page_limit")
         source.visited = True
+        def attempted():
+            if on_request is not None:
+                on_request()
+            source.attempted()
         payload = await self.graph.content_page(page.id, source.edge, FIELDS[source.edge],
             page.access_token, token_key, size, source.cursor, deadline,
             {"status": '["PUBLISHED","ARCHIVED"]'} if source.edge == "stories" else None,
-            on_request=source.attempted)
+            on_request=attempted)
         guard()
         data = payload.get("data")
         if not isinstance(data, list) or len(data) > self.settings.page_size or any(not isinstance(i, dict) for i in data):

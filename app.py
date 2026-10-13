@@ -17,6 +17,7 @@ from errors import AppError
 from graph_api import GraphClient
 from sessions import MemoryStore
 from content import ContentLoader
+from content_jobs import ContentJobs
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -116,6 +117,7 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
                                      trust_env=False, transport=transport) as http:
             application.state.http = http
             application.state.graph = GraphClient(http, settings, application.state.store)
+            application.state.jobs.bind(application.state.graph)
             cleanup = asyncio.create_task(cleanup_loop(application.state.store))
             try:
                 yield
@@ -129,6 +131,8 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
                           docs_url=None, redoc_url=None, openapi_url=None)
     application.state.settings = settings
     application.state.store = MemoryStore(settings)
+    application.state.jobs = ContentJobs(application.state.store, settings)
+    application.state.store.content_jobs = application.state.jobs
     application.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1"])
     application.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
@@ -277,6 +281,44 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         store.require_page(browser_id, session_id, page_id)
         cached = store.audits.get(session_id, page_id)
         return cached or {"page_id": page_id, "state": "not_loaded", "items": [], "displayed": 0}
+
+    @application.post("/api/posts/jobs")
+    async def start_content_job(request: Request):
+        check_origin(request, settings, mutation=True)
+        try:
+            payload = await asyncio.wait_for(read_json(request, settings), settings.connect_timeout)
+        except asyncio.TimeoutError:
+            raise AppError("timeout",504) from None
+        if not isinstance(payload, dict) or set(payload) != {"page_id","limit"}:
+            raise AppError("invalid_load_body")
+        validate_page_id(payload['page_id'])
+        if type(payload['limit']) is not int or not 1 <= payload['limit'] <= 5000:
+            raise AppError('invalid_limit')
+        job=application.state.jobs.start(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload['page_id'],payload['limit'])
+        return application.state.jobs.snapshot(job)
+
+    def owned_job(request, job_id, mutation=False):
+        check_origin(request,settings,mutation=mutation)
+        return application.state.jobs.owned(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),job_id)
+
+    @application.get("/api/posts/jobs/{job_id}")
+    async def content_job_status(request: Request, job_id: str):
+        return application.state.jobs.snapshot(owned_job(request,job_id))
+
+    @application.post("/api/posts/jobs/{job_id}/step")
+    async def content_job_step(request: Request, job_id: str):
+        job=owned_job(request,job_id,True)
+        try:
+            payload=await asyncio.wait_for(read_json(request,settings),settings.connect_timeout)
+        except asyncio.TimeoutError:
+            raise AppError('timeout',504) from None
+        if not isinstance(payload,dict) or set(payload) != {'revision'}:
+            raise AppError('invalid_revision',409)
+        return await application.state.jobs.step(job,payload['revision'])
+
+    @application.post("/api/posts/jobs/{job_id}/stop")
+    async def content_job_stop(request: Request, job_id: str):
+        return await application.state.jobs.stop(owned_job(request,job_id,True))
 
     return application
 

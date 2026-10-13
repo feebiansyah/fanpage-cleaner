@@ -14,6 +14,7 @@
   const status = document.getElementById("availability");
   const operationStatus = document.getElementById("operation-status");
   const loadButton = document.getElementById("load-posts");
+  const stopButton = document.getElementById("stop-load");
   const maxPosts = document.getElementById("max-posts");
   const contentList = document.getElementById("content-list");
   const selectAll = document.getElementById("select-all");
@@ -24,6 +25,11 @@
   const loadProgress = document.getElementById("load-progress");
   let postsLoading = false;
   let postsGeneration = 0;
+  let activeJob = null;
+  let continuationTimer = null;
+  let wakeContinuation = null;
+  let stopping = false;
+  let starting = false;
   let loadedAudit = null;
   let displayPage = 0;
   let cacheTimer = null;
@@ -49,7 +55,8 @@
     fanpageSelect.disabled = busy || !hasPages;
     connectButton.textContent = busy ? "Sedang memproses…" : "Hubungkan";
     status.setAttribute("aria-busy", String(busy));
-    loadButton.disabled = !ready || busy || postsLoading || !connected || !fanpageSelect.value || Date.now() < cooldownUntil;
+    loadButton.disabled = !ready || busy || postsLoading || starting || stopping || !connected || !fanpageSelect.value || Date.now() < cooldownUntil;
+    stopButton.disabled = !postsLoading || stopping;
     maxPosts.disabled = postsLoading || busy;
     loadButton.textContent = postsLoading ? "Sedang memuat…" : "Load Posts";
     loadStatus.setAttribute("aria-busy", String(postsLoading));
@@ -144,6 +151,10 @@
   }
 
   function clearAudit() {
+    cancelContinuation();
+    const oldJob = activeJob;
+    activeJob = null;
+    if (oldJob && !oldJob.terminal) void stopBackend(oldJob.id);
     postsGeneration += 1;
     loadedAudit = null;
     displayPage = 0;
@@ -158,6 +169,63 @@
     selectedCount.textContent = "Terpilih 0 konten.";
     loadStatus.textContent = "Belum ada konten yang dimuat untuk Fanpage ini.";
     loadProgress.setAttribute("value", "0");
+  }
+
+  function cancelContinuation() {
+    clearTimeout(continuationTimer);
+    if (wakeContinuation) wakeContinuation();
+    wakeContinuation = null;
+  }
+
+  function waitLocally(seconds) {
+    return new Promise(resolve => {
+      wakeContinuation = resolve;
+      continuationTimer = setTimeout(() => { wakeContinuation = null; resolve(); }, Math.min(seconds * 1000 + 50, 2147483647));
+    });
+  }
+
+  async function jobMutation(path, body, allowed = () => true) {
+    // A lost response repeats exactly the same revision, never a fresh start.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (!allowed()) {
+        const error = new Error("Pemuatan dibatalkan.");
+        error.code = "load_cancelled";
+        throw error;
+      }
+      try {
+        return await api(path, {method: "POST", headers: {"Content-Type": "application/json"}, ...(body ? {body: JSON.stringify(body)} : {})});
+      } catch (error) {
+        if (error.code || attempt === 2) throw error;
+      }
+    }
+  }
+
+  async function stopBackend(id) {
+    stopping = true;
+    controls();
+    try { return await jobMutation(`/api/posts/jobs/${encodeURIComponent(id)}/stop`); }
+    catch { return null; } // Expiry/disconnect also cancels on the backend.
+    finally { stopping = false; controls(); }
+  }
+
+  function showAudit(data) {
+    loadedAudit = data;
+    const keys = new Set(data.items.filter(item => item.selectable).map(item => item.key));
+    for (const key of selected) if (!keys.has(key)) selected.delete(key);
+    displayPage = Math.min(displayPage, Math.max(0, Math.ceil(data.items.length / DISPLAY_SIZE) - 1));
+    applyCooldown(data.error);
+    for (const error of data.errors || []) applyCooldown(error);
+    renderSourceDiagnostics(data.sources);
+    const stateText = {running: "Pengambilan bertahap sedang berjalan.", cooldown: "Menunggu cooldown lokal; tidak meminta Meta selama menunggu.",
+      partial: "Pengambilan tidak lengkap; hasil parsial. Pilihan hanya untuk audit.", cancelled: "Pemuatan dihentikan; hasil diterima hanya untuk audit.",
+      empty: "Tidak ada konten eligible yang dikembalikan sumber API.", limit_reached: "Batas tampilan tercapai pada kandidat yang dimuat.",
+      source_exhausted: "Sumber API yang dipakai sudah habis sebelum batas tercapai."}[data.state] || "Hasil belum dapat dipastikan.";
+    const errorSource = {published_posts: "Postingan publik", video_reels: "Reels", stories: "Pemeriksaan Story"}[data.error?.source];
+    const counts = Number.isInteger(data.request_count) ? ` Diterima ${data.scanned} item; ${data.request_count} request termasuk retry. ${data.dated_count} bertanggal; ${data.undated_count} tanpa tanggal.` : "";
+    loadStatus.textContent = `Ditemukan ${data.found} kandidat unik; ditampilkan ${data.displayed}.${counts} ${stateText}${data.error ? ` ${errorSource ? `${errorSource}: ` : ""}${data.error.message}` : ""}`;
+    auditWarning.textContent = data.warning;
+    loadProgress.setAttribute("value", String(Math.min(100, data.displayed / (data.limit || 1) * 100)));
+    renderAuditPage();
   }
 
   function safeAuditURL(value, thumbnail = false) {
@@ -183,7 +251,7 @@
   function renderSourceDiagnostics(sources = []) {
     sourceDiagnostics.replaceChildren();
     const names = {published_posts: "Postingan publik", video_reels: "Reels", stories: "Pemeriksaan Story"};
-    const statuses = {limit_reached: "Batas tercapai", source_exhausted: "Sumber habis", failed: "Gagal", cancelled: "Dibatalkan", not_needed: "Tidak diperlukan"};
+    const statuses = {running: "Sedang memuat", cooldown: "Menunggu cooldown", limit_reached: "Batas tercapai", source_exhausted: "Sumber habis", failed: "Gagal", cancelled: "Dibatalkan", not_needed: "Tidak diperlukan"};
     const reasons = {unique_limit: "batas konten unik gabungan tercapai", source_exhausted: "tidak ada halaman berikutnya",
       story_verification_budget: "batas pemeriksaan Story satu halaman; histori tidak ditelusuri",
       no_eligible_candidates: "tidak ada kandidat yang perlu diperiksa", page_limit: "batas halaman lokal",
@@ -191,7 +259,11 @@
       invalid_response: "respons sumber invalid", upstream_error: "respons atau kegagalan layanan sumber tidak dapat digunakan", permission_denied: "akses atau izin ditolak",
       token_invalid: "token tidak valid atau kedaluwarsa", timeout: "timeout", cooldown: "cooldown",
       rate_limited: "rate limit", network_error: "gangguan jaringan", session_expired: "sesi kedaluwarsa",
-      load_cancelled: "koneksi diputus"};
+      load_cancelled: "koneksi diputus", user_stopped: "pengguna menghentikan pemuatan", step_timeout: "batas waktu langkah; cursor tersimpan",
+      request_retry_limit: "batas tiga percobaan halaman lintas langkah",
+      meta_request_timeout: "request Meta timeout setelah retry terbatas", step_timeout_limit: "batas pengulangan timeout langkah",
+      step_request_limit: "batas request langkah", job_request_limit: "batas request total pekerjaan", job_step_limit: "batas langkah total",
+      job_timeout: "batas waktu total pekerjaan", audit_capacity: "batas memori kandidat", internal_error: "kegagalan internal lokal"};
     const countText = value => Number.isInteger(value) && value >= 0 ? String(value) : "tidak tersedia";
     for (const source of sources) {
       const reason = source.stop_reason?.startsWith("stopped_after_")
@@ -302,7 +374,7 @@
   });
 
   loadButton.addEventListener("click", async () => {
-    if (!ready || busy || postsLoading || !connected || !fanpageSelect.value || Date.now() < cooldownUntil) return;
+    if (!ready || busy || postsLoading || starting || stopping || !connected || !fanpageSelect.value || Date.now() < cooldownUntil) return;
     const rawLimit = maxPosts.value;
     const limit = Number(rawLimit);
     if (!/^[0-9]+$/.test(rawLimit) || !Number.isSafeInteger(limit) || limit < 1 || limit > 5000) {
@@ -319,20 +391,27 @@
     loadStatus.textContent = "Sedang memuat kandidat postingan, foto, video dan Reels serta memeriksa ID Story…";
     operationStatus.textContent = "Load Posts sedang berjalan untuk Fanpage yang dipilih.";
     try {
-      const data = await api("/api/posts/load", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({page_id: pageId, limit})});
-      if (generation !== postsGeneration || !connected || pageId !== fanpageSelect.value || data.page_id !== pageId) return;
-      loadedAudit = data;
-      applyCooldown(data.error);
-      for (const error of data.errors || []) applyCooldown(error);
-      renderSourceDiagnostics(data.sources);
-      const stateText = {partial: "Pengambilan tidak lengkap; hasil parsial. Pilihan massal dinonaktifkan.",
-        empty: "Tidak ada konten eligible yang dikembalikan sumber API.",
-        limit_reached: "Batas tampilan tercapai pada kandidat yang dimuat.",
-        source_exhausted: "Sumber API yang dipakai sudah habis sebelum batas tercapai."}[data.state] || "Hasil belum dapat dipastikan.";
-      const errorSource = {published_posts: "Postingan publik", video_reels: "Reels", stories: "Pemeriksaan Story"}[data.error?.source];
-      loadStatus.textContent = `Ditemukan ${data.found} kandidat unik; ditampilkan ${data.displayed}. ${stateText}${data.error ? ` ${errorSource ? `${errorSource}: ` : ""}${data.error.message}` : ""}`;
-      auditWarning.textContent = data.warning;
-      renderAuditPage();
+      const current = () => generation === postsGeneration && connected && pageId === fanpageSelect.value;
+      let data;
+      starting = true;
+      try { data = await jobMutation("/api/posts/jobs", {page_id: pageId, limit}, current); }
+      finally { starting = false; controls(); }
+      if (!current()) {
+        if (data.job_id && !data.terminal) await stopBackend(data.job_id);
+        return;
+      }
+      if (data.job_id) activeJob = {id: data.job_id, terminal: data.terminal};
+      while (current() && data.page_id === pageId) {
+        if (activeJob) activeJob.terminal = data.terminal;
+        showAudit(data);
+        if (!data.job_id || data.terminal) break;
+        let wait = Math.max(data.resume_after_seconds || 0, (cooldownUntil - Date.now()) / 1000);
+        if (Number.isFinite(data.job_remaining_seconds)) wait = Math.min(wait, Math.max(1, data.job_remaining_seconds));
+        if (wait > 0) await waitLocally(wait);
+        if (!current()) return;
+        data = await jobMutation(`/api/posts/jobs/${encodeURIComponent(data.job_id)}/step`, {revision: data.revision}, current);
+      }
+      if (!current()) return;
       if (Number.isFinite(data.cache_ttl_seconds)) {
         cacheTimer = setTimeout(() => {
           if (generation !== postsGeneration) return;
@@ -346,11 +425,29 @@
       renderSourceDiagnostics(error.sources);
       if (["session_expired", "load_cancelled"].includes(error.code)) await reconcileAfterFailure(error);
     } finally {
-      postsLoading = false;
-      if (generation === postsGeneration) loadProgress.setAttribute("value", "0");
-      operationStatus.textContent = "Tidak ada penghapusan yang berjalan. Daftar hanya untuk audit.";
+      if (generation === postsGeneration) {
+        postsLoading = false;
+        activeJob = null;
+        operationStatus.textContent = "Tidak ada penghapusan yang berjalan. Daftar hanya untuk audit.";
+      } else if (!activeJob) postsLoading = false;
       controls();
     }
+  });
+
+  stopButton.addEventListener("click", async () => {
+    if (!postsLoading || stopping) return;
+    const job = activeJob;
+    postsGeneration += 1;
+    const generation = postsGeneration;
+    activeJob = null;
+    cancelContinuation();
+    postsLoading = false;
+    controls();
+    const data = job ? await stopBackend(job.id) : null;
+    if (generation !== postsGeneration) return;
+    if (data && data.page_id === fanpageSelect.value) showAudit(data);
+    else loadStatus.textContent = job ? "Kelanjutan dihentikan di browser; backend belum mengonfirmasi penghentian. Pekerjaan tunduk pada batas waktu." : "Pemuatan dihentikan. Halaman yang diterima hanya untuk audit.";
+    operationStatus.textContent = "Pemuatan dihentikan; penghapusan tidak tersedia.";
   });
 
   connectButton.addEventListener("click", async () => {

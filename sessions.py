@@ -63,11 +63,14 @@ class MemoryStore:
         self.reserved_slots = 0
         self._salt = secrets.token_bytes(32)
         self.audits = AuditCache(settings)
+        self.content_jobs = None
 
     def cleanup(self):
         now = time.monotonic()
         for key in [key for key, session in self.sessions.items() if session.expires_at <= now]:
             del self.sessions[key]
+        if self.content_jobs is not None:
+            self.content_jobs.cleanup()
         self.audits.cleanup(self.sessions)
         for key, browser in list(self.browsers.items()):
             if browser.expires_at <= now and not browser.busy and not browser.load_active:
@@ -171,6 +174,8 @@ class MemoryStore:
 
     def replace(self, browser_id: str, user_token: str, pages: list[Page]):
         browser = self.browsers[browser_id]
+        if self.content_jobs is not None:
+            self.content_jobs.discard_session(browser.session_id)
         self.audits.discard(browser.session_id)
         self.sessions.pop(browser.session_id, None)
         session_id = secrets.token_urlsafe(32)
@@ -185,6 +190,8 @@ class MemoryStore:
         if browser and browser.busy:
             raise AppError("connection_busy", 409)
         if self.session(browser_id, session_id) is not None:
+            if self.content_jobs is not None:
+                self.content_jobs.discard_session(session_id)
             if browser.load_task is not None:
                 browser.load_task.cancel()
             self.audits.discard(session_id)
@@ -235,6 +242,8 @@ class MemoryStore:
         self.audits.release(session_id)
 
     def clear(self):
+        if self.content_jobs is not None:
+            self.content_jobs.clear()
         for browser in self.browsers.values():
             if browser.load_task is not None:
                 browser.load_task.cancel()

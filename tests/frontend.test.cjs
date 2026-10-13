@@ -21,7 +21,7 @@ class Element {
 function setup(responses) {
   const ids = ['facebook-token', 'connect', 'disconnect', 'fanpage', 'page-count', 'availability', 'operation-status',
     'load-posts', 'max-posts', 'content-list', 'select-all', 'selected-count', 'load-status', 'audit-warning', 'local-pagination', 'load-progress',
-    'fanpage-search', 'fanpage-search-status', 'source-diagnostics'];
+    'fanpage-search', 'fanpage-search-status', 'source-diagnostics', 'stop-load'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id === 'fanpage' ? 'select' : 'div')]));
   elements['max-posts'].value = '100';
   const requests = [];
@@ -174,7 +174,7 @@ test('load active only with selected Page and valid limit; submits no token', as
   assert.equal(requests.length, 1);
   elements['max-posts'].value = '20';
   await elements['load-posts'].events.click();
-  assert.equal(requests[1].path, '/api/posts/load');
+  assert.equal(requests[1].path, '/api/posts/jobs');
   assert.deepEqual(JSON.parse(requests[1].options.body), {page_id: '11', limit: 20});
   assert.equal(elements['content-list'].children.length, 20);
 });
@@ -333,4 +333,111 @@ test('cooldown from a later source error is honored even when first error is per
   await tick();
   await elements['load-posts'].events.click();
   assert.equal(elements['load-posts'].disabled, true);
+});
+
+function jobState(revision, overrides = {}) {
+  return {...audit(1), job_id: 'opaque-job', revision, terminal: false, state: 'running',
+    request_count: revision * 2, dated_count: 1, undated_count: 0, resume_after_seconds: 0, ...overrides};
+}
+
+test('job advances same id/revision automatically and preserves audit selection', async () => {
+  let release;
+  const {elements, requests} = setup([connected, jobState(0, {items: [], displayed: 0}), jobState(1),
+    () => new Promise(resolve => {release = () => resolve({ok: true, json: async () => jobState(2, {terminal: true, state: 'source_exhausted'})});})]);
+  await tick();
+  const work = elements['load-posts'].events.click();
+  await tick();
+  assert.equal(elements['stop-load'].disabled, false);
+  elements['select-all'].checked = true;
+  elements['select-all'].events.change();
+  release();
+  await work;
+  assert.deepEqual(requests.slice(1).map(r => r.path), ['/api/posts/jobs', '/api/posts/jobs/opaque-job/step', '/api/posts/jobs/opaque-job/step']);
+  assert.deepEqual(requests.slice(2).map(r => JSON.parse(r.options.body).revision), [0,1]);
+  assert.match(elements['selected-count'].textContent, /Terpilih 1/);
+  assert.match(elements['load-status'].textContent, /bertanggal/);
+  assert.equal(elements['stop-load'].disabled, true);
+});
+
+test('lost step response retries identical revision without starting a new job', async () => {
+  const {elements, requests} = setup([connected, jobState(0), () => {throw Error('lost');}, jobState(1, {terminal: true})]);
+  await tick();
+  await elements['load-posts'].events.click();
+  assert.equal(requests.filter(r => r.path === '/api/posts/jobs').length, 1);
+  assert.deepEqual(requests.slice(2).map(r => JSON.parse(r.options.body).revision), [0,0]);
+});
+
+test('cooldown waits on local timer and stop cancels continuation', async () => {
+  const {elements, requests, timers} = setup([connected, jobState(0), jobState(1, {state:'cooldown', resume_after_seconds:30}),
+    jobState(2, {terminal:true, state:'cancelled'})]);
+  await tick();
+  const work = elements['load-posts'].events.click();
+  await tick();
+  assert.equal(requests.length,3);
+  assert.ok(timers.some(t => t.delay >= 30000));
+  await elements['stop-load'].events.click();
+  await work;
+  assert.equal(requests[3].path,'/api/posts/jobs/opaque-job/stop');
+  assert.equal(requests.filter(r => r.path.endsWith('/step')).length,1);
+  assert.match(elements['load-status'].textContent,/dihentikan|dibatalkan/i);
+});
+
+test('Page change cancels backend job and late step cannot render old data', async () => {
+  let release;
+  const session={...connected,count:2,pages:[{id:'11',name:'A'},{id:'22',name:'B'}]};
+  const {elements, requests}=setup([session,jobState(0),()=>new Promise(resolve=>{release=()=>resolve({ok:true,json:async()=>jobState(1)});}),jobState(2,{terminal:true,state:'cancelled'})]);
+  await tick();
+  const work=elements['load-posts'].events.click();
+  await tick();
+  elements.fanpage.value='22';
+  elements.fanpage.events.change();
+  await tick();
+  release();
+  await work;
+  assert.ok(requests.some(r=>r.path.endsWith('/stop')));
+  assert.equal(elements['content-list'].children.length,0);
+});
+
+
+test('stop during failed step prevents frontend retry and later Meta continuation', async () => {
+  let rejectStep;
+  const {elements, requests}=setup([connected,jobState(0),()=>new Promise((resolve,reject)=>{rejectStep=reject;}),jobState(1,{terminal:true,state:'cancelled'})]);
+  await tick();
+  const work=elements['load-posts'].events.click();
+  await tick();
+  await elements['stop-load'].events.click();
+  rejectStep(Error('lost response after stop'));
+  await work;
+  assert.equal(requests.filter(r=>r.path.endsWith('/step')).length,1);
+  assert.equal(requests.filter(r=>r.path.endsWith('/stop')).length,1);
+});
+
+test('disconnect while job step pending clears audit and prevents following steps', async () => {
+  let release;
+  const {elements,requests}=setup([connected,jobState(0),()=>new Promise(resolve=>{release=()=>resolve({ok:true,json:async()=>jobState(1)});}),jobState(2,{terminal:true,state:'cancelled'}),disconnected]);
+  await tick();
+  const work=elements['load-posts'].events.click();
+  await tick();
+  await elements.disconnect.events.click();
+  release();
+  await work;
+  assert.equal(requests.filter(r=>r.path.endsWith('/step')).length,1);
+  assert.equal(elements['content-list'].children.length,0);
+  assert.equal(elements['load-posts'].disabled,true);
+});
+
+test('cooldown wait is capped by job deadline for local expiry reconciliation', async () => {
+  const {elements, requests, timers}=setup([connected,jobState(0),
+    jobState(1,{state:'cooldown',resume_after_seconds:300,job_remaining_seconds:2}),
+    jobState(2,{state:'partial',terminal:true,step_stop_reason:'job_timeout'})]);
+  await tick();
+  const work=elements['load-posts'].events.click();
+  await tick();
+  const wait=timers.find(t=>t.delay===2050);
+  assert.ok(wait);
+  assert.equal(requests.length,3);
+  wait.fn();
+  await work;
+  assert.equal(requests.length,4);
+  assert.match(elements['load-status'].textContent,/parsial/i);
 });

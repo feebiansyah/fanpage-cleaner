@@ -1,6 +1,8 @@
 """Error tetap: tidak pernah menyertakan input, exception, atau pesan Meta."""
 
 MESSAGES = {
+    "job_not_found": "Pekerjaan tidak tersedia pada sesi ini atau sudah kedaluwarsa.",
+    "invalid_revision": "Nomor langkah pekerjaan tidak valid. Baca status lokal pekerjaan.",
     "invalid_limit": "Maksimal postingan harus bilangan bulat antara 1 dan 5000.",
     "invalid_page": "Page ID harus berupa teks ID Fanpage yang valid.",
     "invalid_load_body": "Body Load Posts harus JSON dengan page_id dan limit saja.",

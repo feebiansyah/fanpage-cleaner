@@ -38,6 +38,15 @@ class Settings:
     cooldown_seconds: float = 60
     usage_threshold: float = 90
     posts_timeout: float = 60
+    posts_step_timeout: float = 12
+    posts_step_requests: int = 6
+    posts_job_timeout: float = 600
+    posts_job_requests: int = 300
+    posts_job_steps: int = 200
+    content_job_idle_ttl: float = 120
+    max_content_jobs: int = 20
+    max_content_job_items: int = 20000
+    max_content_job_bytes: int = 134217728
     posts_max_pages: int = 50
     story_max_items: int = 5000
     audit_ttl: int = 300
@@ -66,6 +75,9 @@ class Settings:
             raise ValueError("Pool harus mencukupi batas pekerjaan/keepalive.")
         if self.usage_threshold > 100 or self.page_size > 100:
             raise ValueError("Ambang penggunaan dan ukuran halaman maksimum 100.")
+        for name in ("posts_step_requests", "posts_job_requests", "posts_job_steps", "max_content_jobs", "max_content_job_items", "max_content_job_bytes"):
+            if type(getattr(self, name)) is not int:
+                raise ValueError("Batas pekerjaan harus bilangan bulat positif.")
         if self.browser_ttl < self.session_ttl or self.max_token_length > self.max_body_bytes:
             raise ValueError("TTL browser/ukuran body harus mencukupi sesi/token.")
         if self.cookie_secure and parsed.scheme != "https":

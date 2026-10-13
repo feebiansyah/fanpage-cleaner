@@ -175,6 +175,11 @@ class GraphClient:
         try:
             return await asyncio.wait_for(self._get(token, token_key, endpoint, params, deadline, on_request), remaining)
         except asyncio.TimeoutError:
+            # Windows monotonic clock resolution can make asyncio timers wake
+            # before this absolute deadline. Do not misclassify session expiry
+            # or save a result in that gap; the cancelled page is not retried.
+            while time.monotonic() < deadline:
+                await asyncio.sleep(deadline-time.monotonic())
             raise AppError("timeout", 504) from None
 
     async def _get(self, token, token_key, endpoint, params, deadline, on_request=None):

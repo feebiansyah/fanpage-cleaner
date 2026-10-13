@@ -2,16 +2,18 @@
 
 Aplikasi FastAPI + Jinja2 satu halaman berbahasa Indonesia. Koneksi tahap 2 menerima **Facebook user access token** dan daftar Fanpage lewat `GET /me/accounts`. Tahap 3 menambahkan **Load Posts untuk audit**. Tidak ada OAuth, pertukaran/perpanjangan token, database, data konten contoh, atau penghapusan. Seluruh request aplikasi ke Meta tetap GET, tanpa DELETE.
 
-## Load Posts: mulai dengan limit 20
+## Load Posts bertahap: coba 100, lalu 3000
 
-1. Jalankan server satu proses sesuai perintah Windows di bawah. Hubungkan token melalui input password, lalu pilih Fanpage.
-2. Isi **Maksimal postingan = 20**, kemudian klik **Load Posts**. Default 100, minimum 1, maksimum lokal 5000; tidak ada mode mengambil semua. Setelah memeriksa hasil dan ringkasan sumber, coba 100 lalu naikkan bertahap sesuai kebutuhan; hormati cooldown.
-3. Lihat jumlah kandidat unik ditemukan, jumlah ditampilkan, status hasil, serta peringatan cakupan. Angka maksimal berlaku pada hasil akhir setelah deduplikasi dan pengecualian Story yang teridentifikasi.
-4. Cocokkan daftar dengan tab **Postingan** Fanpage di aplikasi Facebook. Nomor, jenis, teks, thumbnail yang tersedia, link Facebook, dan tanggal acuan API dalam WIB ditampilkan. Postingan disematkan/susunan khusus dapat membuat urutan aplikasi Facebook berbeda.
-5. Halaman tampilan berisi maksimal **50 konten**. Sebelumnya/Berikutnya hanya membaca array lokal dan tidak meminta Meta lagi. Pilih Semua memilih semua konten eligible yang dimuat, bukan hanya halaman terlihat; jumlah terpilih ditampilkan. Pilihan hanya untuk audit, tanpa delete target.
-6. **Cari Fanpage** memfilter nama atau Page ID secara lokal, tanpa request Meta. Pilihan aktif tetap dipertahankan dan ditandai bila berada di luar hasil pencarian. Refresh status juga mempertahankannya jika masih tersedia. Daftar audit baru dibersihkan saat benar-benar memilih Fanpage lain. Ganti Fanpage untuk membersihkan daftar/pilihan lama. Respons load Page lama diabaikan. Putuskan Koneksi saat load membatalkan pekerjaan backend dan mencegah hasil lama muncul kembali.
+1. Jalankan satu proses server memakai interpreter `.venv` sesuai perintah Windows di bawah, hubungkan token, lalu pilih Fanpage. **Cari Fanpage** memfilter nama/Page ID lokal tanpa request Meta; pilihan aktif tetap dipertahankan dan ditandai bila di luar pencarian.
+2. Isi **Maksimal postingan = 100**, klik satu tombol **Load Posts**. Minimum 1, default 100, maksimum 5000; angka ini maksimum unik ditampilkan, bukan janji jumlah atau N terbaru seluruh Page.
+3. Browser memulai satu pekerjaan lokal, kemudian melanjutkan langkah pekerjaan yang sama otomatis. Cursor dan kandidat disimpan backend; halaman berhasil diterima tidak diminta dari awal lagi. Awal pengambilan membagi anggaran kandidat antara dua sumber yang belum terbukti saling mencakup: limit 100 meminta sekitar 50 dari posts dan 50 dari Reels, kemudian mengisi kekurangan setelah deduplikasi/pengecualian. API boleh mengembalikan lebih sedikit/lebih banyak dari request; hasil tampilan tetap dibatasi.
+4. Perhatikan progres nyata: item mentah diterima, kandidat unik, jumlah ditampilkan, request termasuk retry, jumlah bertanggal/tanpa tanggal, dan **Ringkasan sumber API**. Saat cooldown, timer browser menunggu lokal; tidak ada polling Meta untuk mengecek cooldown. Waktu tunggu tetap mengurangi batas total pekerjaan dan sisa sesi.
+5. Cocokkan kandidat dengan tab **Postingan** Fanpage Facebook. Tanggal acuan Post dari API ditampilkan WIB; Reel tanpa relasi Post tetap **Tanggal tidak tersedia** dan berada di akhir. Susunan aplikasi/pin dapat berbeda. Tidak ada jaminan seluruh konten tersedia lewat API.
+6. Daftar memakai pagination lokal **50 konten**; mengganti halaman atau mencari Fanpage tidak meminta Meta. Checkbox dan **Pilih Semua** hanya pilihan audit, boleh aktif pada hasil berjalan/parsial/cakupan Story belum pasti. Pilih Semua mencakup seluruh hasil dimuat, dan pilihan yang masih ada dipertahankan saat snapshot bertambah. Ini tidak menyatakan konten aman dihapus.
+7. **Berhenti** menghentikan pemuatan, mempertahankan halaman diterima untuk audit, dan menghentikan langkah lanjutan. Memilih Fanpage lain membatalkan pekerjaan lama dan membersihkan audit. Disconnect/sesi habis menghapus pekerjaan dan token sesi; respons lama tidak ditampilkan.
+8. Setelah hasil 100 diperiksa, coba **3000**. Baca alasan berhenti per sumber; hasil boleh kurang dari maksimum akibat sumber habis, izin, batas lokal, atau error. Jangan menyimpulkan penyebab hasil nyata 1600 posts + 543 Reels selain timeout yang memang dilaporkan pengguna; diagnosis baru membantu pemeriksaan berikutnya.
 
-**Hapus Terpilih dan Berhenti tetap nonaktif.** Tidak ada fungsi penghapusan. Jika pemeriksaan Story gagal atau relasi Story tidak mencukupi, checkbox individual juga nonaktif; pada semua hasil parsial Pilih Semua nonaktif.
+**Hapus Terpilih tetap nonaktif; tidak ada request DELETE.** Pemilihan untuk audit dipisahkan dari pengecualian Story dan kelayakan penghapusan. Thumbnail hitam/perilaku gambar tidak diubah.
 
 ## Sumber API tahap 3 dan bukti
 
@@ -31,13 +33,13 @@ Identitas asli dan provenance sumber disimpan. Post dan Reel digabung jika `Reel
 
 Story dikeluarkan melalui seluruh identitas yang tersedia (`id`, `post_id`, `media_id`). Kata/field `story` pada Post tidak dijadikan klasifikasi Facebook Story. Pemeriksaan mengambil **maksimal satu halaman logis**, dengan limit minimum dari batas pengguna, PAGE_SIZE, dan STORY_MAX_ITEMS; retry tetap maksimal dua. Kandidat kosong pada kedua sumber tidak memerlukan request Story. ID Story yang ditemukan juga diterapkan pada halaman konten selanjutnya.
 
-Jika halaman Story masih memiliki next, atau referensi Post/media tidak lengkap, pengambilan konten dapat selesai tetapi pengecualian Story **belum terverifikasi**: keterbatasan ditampilkan dan seluruh checkbox/Pilih Semua nonaktif. Ketidakpastian ini bukan kegagalan pagination. Kegagalan request Story yang nyata menghasilkan hasil parsial. Bahkan bila pemeriksaan berakhir, histori/retensi/kelengkapan Story Meta belum terbukti; `story_exclusion=matched_ids_only` hanya menyatakan kecocokan ID dalam pemeriksaan tersebut. Tidak ada klaim aman dihapus.
+Jika halaman Story masih memiliki next, atau referensi Post/media tidak lengkap, pengambilan konten dapat selesai tetapi pengecualian Story **belum terverifikasi**. Checkbox audit boleh aktif; ini tidak mengubah cakupan Story atau safe_for_delete. Ketidakpastian ini bukan kegagalan pagination. Kegagalan request Story yang nyata menghasilkan hasil parsial. Bahkan bila pemeriksaan berakhir, **Pengecualian Story seluruh kandidat belum selesai dibuktikan**: cakupan published_posts/video_reels dan histori/retensi Story Meta belum terverifikasi; `story_exclusion=matched_ids_only` hanya menyatakan kecocokan ID dalam pemeriksaan tersebut. Tidak ada klaim aman dihapus.
 
 ## Urutan dan makna limit
 
 SDK membuktikan GET dan field, **tidak menjamin urutan kronologis pagination**. Karena itu aplikasi tidak mengklaim N terbaru seluruh Fanpage. Published posts dan Reels dikunjungi masing-masing pada awal, lalu diambil bertahap/bergantian sampai **jumlah unik gabungan setelah deduplikasi dan pengecualian** mencapai batas pengguna, sumber habis, atau batas/kegagalan menghentikan pekerjaan. Tidak ada kuota N terpisah yang menghentikan sumber sebelum deduplikasi lintas sumber. Request berikutnya menyesuaikan sisa kuota; satu respons halaman dapat memberikan sedikit kandidat ekstra. Aplikasi tidak memuat seluruh Fanpage dahulu lalu memotongnya, dan tidak berhenti setelah N dari sumber pertama tanpa mengunjungi Reels.
 
-Kandidat yang berhasil diperoleh digabung/dideduplikasi, diurutkan secara global di antara kandidat tersebut, kemudian dibatasi maksimal N. Acuan tanggal Post adalah `created_time` pada Post terbit; [SDK Post](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/post.py) mengonfirmasi field, tetapi deskripsi semantik publikasi lengkap pada dokumentasi primer belum dapat dibaca. Pengguna perlu membandingkan tanggal ini dengan tab Postingan Facebook. Jangan menafsirkan sort kandidat sebagai bukti kronologi seluruh sumber.
+Kandidat yang berhasil diperoleh digabung/dideduplikasi, diurutkan secara global di antara kandidat tersebut, kemudian dibatasi maksimal N. Acuan tanggal Post adalah `created_time` pada Post terbit; [SDK Post](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/post.py) mengonfirmasi field, tetapi deskripsi semantik publikasi lengkap pada dokumentasi primer belum dapat dibaca. Pengguna perlu membandingkan tanggal ini dengan tab Postingan Facebook; keberadaan field tidak membuktikan semantik publikasi, termasuk konten backdated. Parser Python 3.10 menerima offset Graph +0000 dengan menormalkan format offset ke +00:00, tanpa mengubah waktu absolut. Jangan menafsirkan sort kandidat sebagai bukti kronologi seluruh sumber.
 
 **created_time video/Reel tidak dipakai sebagai publikasi** karena waktu upload/pembuatan dapat berbeda. Reel hanya mendapat tanggal dari relasi Post terbit yang berhasil dimuat. Tidak ada pengganti dari updated_time, waktu server sekarang, atau jadwal publikasi. Tanggal hilang/invalid/naive ditampilkan sebagai **Tanggal tidak tersedia**, dikelompokkan setelah kandidat bertanggal. Tie-breaker stabil berbasis sumber+ID asli. Waktu absolut UTC dipakai untuk sort lalu dikonversi ke WIB (+07:00, Asia/Jakarta). Jenis Foto/Video memakai status API yang dikenal; jenis yang tidak terbukti lebih spesifik tetap Postingan.
 
@@ -48,7 +50,9 @@ Jika N kandidat bertanggal sudah mengisi batas, kandidat tanpa tanggal mungkin t
 | `limit_reached` | Batas tampilan tercapai pada kandidat yang dimuat; bukan jaminan N terbaru global |
 | `source_exhausted` | Listing konten yang dipakai sudah tidak punya next sebelum batas tercapai; bukan seluruh postingan Facebook pasti tersedia |
 | `empty` | Tidak ada kandidat eligible; dibedakan dari error token/izin |
-| `partial` | Request sumber, pagination, deadline, atau batas lokal benar-benar menghentikan pengambilan; jumlah dan error aman ditampilkan, pilihan massal nonaktif |
+| `running` / `cooldown` | Pekerjaan belum selesai / menunggu timer lokal; kandidat diterima dapat diaudit |
+| `cancelled` | Pengguna menghentikan pemuatan; hasil diterima tetap hanya untuk audit |
+| `partial` | Request sumber, pagination, deadline, atau batas lokal benar-benar menghentikan pengambilan; jumlah dan error aman ditampilkan, pilihan hanya untuk audit |
 
 `retrieval_complete` hanya berarti pengambilan **berdasarkan policy bounded lokal** selesai, bukan cakupan Facebook lengkap. Semua hasil tetap memiliki `coverage_complete=false`, `latest_guaranteed=false`, `safe_for_delete=false`. Tidak ada konten yang dinyatakan aman dihapus.
 
@@ -58,35 +62,40 @@ Buka **Ringkasan sumber API** untuk published_posts, video_reels, dan stories. S
 
 Keberhasilan akuisisi, ketidakpastian cakupan/urutan/identitas, dan kegagalan nyata dilaporkan terpisah. Maksimal 3000 tidak mewajibkan 3000 hasil. Bila sumber habis pada 1743, status menyebut sumber habis; jika error/batas lokal, alasan sumber tersebut ditampilkan. **Penyebab hasil 1743 pada pengujian Facebook sebelumnya belum diketahui**; tes mock 1743 hanya membuktikan perilaku ketika API benar-benar habis, bukan menjelaskan kejadian itu.
 
-Contoh request yang benar-benar diukur pada tes mock (bukan Facebook nyata):
+Pengukuran mock pekerjaan bertahap (bukan Facebook nyata): limit 3000, posts 30 halaman masing-masing 100, Reels kosong dan Story kosong menghasilkan **3000 kandidat lewat beberapa langkah dan 32 request Meta**. Sumber Reels habis tidak dipanggil lagi, cursor posts berlanjut 100, 200, ... 2900. Maksimal enam percobaan request per langkah. Tes juga membuktikan timeout langkah menyimpan halaman sebelumnya dan cursor valid, cooldown tidak mengirim request, serta replay revisi tidak mengambil halaman ulang.
 
-| Skenario | Request aktual |
-| --- | --- |
-| Limit 20, satu batch posts dan Reels, satu pemeriksaan Story | 3 |
-| Kedua listing kosong | 2; stories tidak dipanggil |
-| Limit 20, posts mengembalikan dua halaman berisi 10 item, Reels kosong, Story kosong | 4 |
-| Sumber posts: 503, retry berhasil, halaman berikutnya ditolak izin | 3 pada posts termasuk retry; kegagalan diberi nama sumber |
-| Limit 3000, mock posts habis pada 1743 (18 halaman), Reels dan Story kosong | 20 total; 18 pada posts |
-
-Tidak ada sumber yang berhasil dibuktikan bebas Story atau mencakup seluruh sumber lain dari bukti resmi yang dapat diakses. Karena itu tidak ada jalan pintas konfigurasi untuk melewati perlindungan Story. Penghematan berasal dari penghapusan scan histori dan penghentian berbasis jumlah unik, tanpa menaikkan timeout/batas halaman. Thumbnail dan perilaku gambarnya dipertahankan.
+Tidak ada bukti resmi yang berhasil diakses untuk menyatakan published_posts/video_reels pasti bebas Facebook Story. SDK hanya membuktikan method/field tersedia. Karena itu request Story tidak dihapus, dan pemeriksaan satu halaman **tidak dijadikan bukti seluruh kandidat bebas Story**. Story yang identitasnya ditemukan dikeluarkan; bagian yang belum pasti ialah kandidat lain yang tidak dapat dibandingkan dengan histori Story lengkap. Tidak ada jalan pintas story_complete=True atau klaim persoalan cakupan selesai.
 
 ## Memori, keamanan, dan batas tahap 3
 
-POST `/api/posts/load` menerima hanya `{"page_id":"…","limit":20}`. Page ID harus ada pada sesi pemilik dan page token tersedia; frontend tidak mengirim token. Origin/cookie/no-store/AsyncClient/retry/cooldown/ukuran respons dari tahap 2 tetap digunakan. GET `/api/posts?page_id=…` membaca hasil terakhir milik sesi dari memori, tanpa request Meta; Page yang tidak dimiliki ditolak. UI mengganti halaman secara lokal tanpa memanggil endpoint ini.
+POST `/api/posts/jobs` menerima hanya `{"page_id":"11","limit":100}`. Page harus milik sesi dan memiliki page token; frontend tidak mengirim token. Start tidak meminta Meta, mengembalikan job_id opaque dan revisi. State memori menyimpan pemilik, Page ID, limit, kandidat, cursor/identitas dedup, statistik dan status; **tidak menyalin token ke pekerjaan**. Token diambil sementara dari sesi pada langkah yang aktif.
 
-Satu load aktif per browser. Pekerjaan connect dan load berbagi maksimal pekerjaan Graph global serta limiter browser/global yang sama. Default tiga pekerjaan total per browser per menit, dua pekerjaan global bersamaan. Reconnect saat load aktif ditolak; disconnect membatalkan load. TTL sesi tidak diperpanjang oleh load. Deadline dibatasi sisa TTL sesi; bila sesi habis, hasil tidak disimpan dan alasan ditampilkan. Pergantian Page menggunakan guard generasi frontend untuk menolak respons lama.
+POST `/api/posts/jobs/{job_id}/step` menerima `{"revision":0}`. Hanya satu task langkah aktif: request bersamaan berbagi task, revisi lama mengembalikan snapshot saat ini tanpa akuisisi baru. Respons langkah yang hilang boleh diulang frontend maksimal dua kali dengan revisi sama. Start ulang dengan Page/limit sama saat aktif mengembalikan job yang sama, tanpa admission/request baru. GET `/api/posts/jobs/{job_id}` membaca progres memori tanpa Meta. POST `/api/posts/jobs/{job_id}/stop` idempotent menghentikan task/lanjutan, menyimpan audit yang diterima. Job/cursor/token tidak disimpan di browser storage; job_id bukan otorisasi tanpa cookie sesi pemilik.
 
-| Konfigurasi tambahan | Default / perilaku |
+Endpoint lama `/api/posts/load` dipertahankan sebagai jalur kompatibilitas kontrak tahap sebelumnya (satu operasi dengan POSTS_TIMEOUT, policy checkbox konservatif lama); UI tidak menggunakannya. GET `/api/posts?page_id=11` membaca cache terakhir pemilik tanpa Meta. Pagination UI hanya array lokal.
+
+Satu job aktif per browser dan satu langkah aktif per job. Connect/load berbagi limiter admission browser/global dan dua slot pekerjaan global. Slot job dipertahankan selama job aktif, termasuk cooldown, lalu dilepas saat selesai/stop/expiry. Maksimal dua request Graph bersamaan melalui job/connect; AsyncClient dan pool tahap 2 tetap digunakan. Kelanjutan revisi tidak dihitung sebagai job baru. Reconnect saat job aktif ditolak.
+
+| Batas pekerjaan baru | Default / perilaku |
 | --- | --- |
-| `POSTS_TIMEOUT` | 60 detik untuk seluruh Story/posts/Reels/retry, juga dibatasi sisa sesi |
-| `POSTS_MAX_PAGES` | 50 halaman per sumber, hanya next yang sah melanjutkan; cursor/halaman berulang ditolak |
-| `STORY_MAX_ITEMS` | 5000 sebagai batas atas konfigurasi lama; pemeriksaan aktual satu halaman, limit min(batas pengguna, PAGE_SIZE, nilai ini), tanpa memindai histori |
-| `AUDIT_TTL` | 300 detik; hasil juga berakhir saat sesi habis/restart/disconnect |
-| `MAX_AUDIT_ENTRIES` | 20 hasil terakhir per sesi; tanpa eviksi diam-diam sesi lain |
-| `MAX_AUDIT_ITEMS` | 20000 konten total dalam cache |
-| `MAX_AUDIT_BYTES` | 64 MiB total budget serialisasi; reservasi konservatif 8192 byte/item + overhead sebelum request Meta |
+| POSTS_STEP_TIMEOUT | 12 detik per langkah; halaman yang telah dikomit tetap tersedia |
+| POSTS_STEP_REQUESTS | 6 percobaan request aktual termasuk retry per langkah |
+| POSTS_JOB_TIMEOUT | 600 detik total, termasuk cooldown; selalu dibatasi sisa sesi |
+| POSTS_JOB_REQUESTS / POSTS_JOB_STEPS | 300 percobaan request / 200 langkah total |
+| POSTS_MAX_PAGES | 50 halaman valid per sumber; next sah wajib, cursor/halaman berulang ditolak |
+| REQUEST_TIMEOUT / CONNECT_TIMEOUT | 10 / 5 detik transport; timeout request Meta berbeda dari batas langkah |
+| Retry halaman | Maksimal tiga percobaan (awal + dua retry), dihitung lintas langkah pada cursor yang sama; tidak direset oleh request frontend |
+| Timeout langkah berulang | Maksimal tiga interupsi halaman yang belum selesai; setelah itu sumber gagal, tidak retry tanpa akhir |
+| CONTENT_JOB_IDLE_TTL | 120 detik tanpa kelanjutan; cooldown yang sah memberi waktu hingga resume + TTL, tetap tunduk pada sesi/600 detik total |
+| MAX_CONTENT_JOBS / MAX_CONTENT_JOB_ITEMS | 20 entri job (aktif + selesai), 20000 slot kandidat konservatif total; aktif tetap maksimal MAX_JOBS=2 |
+| MAX_CONTENT_JOB_BYTES | 128 MiB budget reservasi kandidat; sebelum start dicadangkan (2*limit+200)*8192 + 65536 byte/job |
+| STORY_MAX_ITEMS | 5000 batas atas konfigurasi lama; aktual satu halaman, min(limit pengguna, PAGE_SIZE=100, nilai ini) |
+| AUDIT_TTL / MAX_AUDIT_ENTRIES | 300 detik / 20 hasil cache; cache terpisah dari kandidat kerja |
+| MAX_AUDIT_ITEMS / MAX_AUDIT_BYTES | 20000 hasil / 64 MiB budget serialisasi; reservasi sebelum request |
 
-Cache satu hasil terakhir per sesi. Load baru menggantikan audit lama browser itu; hasil parsial dapat disimpan dengan label parsial. Kapasitas entry/row/byte dicadangkan sebelum Graph; bila penuh, request ditolak tanpa mengambil data. Angka byte adalah budget serialisasi dan reservasi, bukan ukuran pasti heap Python. Memori sementara kandidat dibatasi akuisisi bertahap menurut kuota unik gabungan, batas halaman, dan ukuran response. Tidak ada database/file hasil. Frontend membersihkan audit ketika TTL hasil habis.
+Deadline langkah hanya mengulang halaman yang belum diterima, dengan cursor terakhir valid; halaman yang sudah berhasil dikomit tidak diulang. Timeout request Meta setelah retry terbatas membuat sumber gagal/hasil parsial, sementara halaman sebelumnya tetap ada. Error permanen sumber tidak dicoba ulang; sumber lain yang masih dapat dibaca dapat menyelesaikan akuisisi terbatas. Batas total menghasilkan partial dengan alasan job_timeout/job_request_limit/job_step_limit. Kegagalan Story tidak mengubah audit menjadi aman dihapus. Hasil kosong, sumber habis, batas unik, partial, cooldown, dan pembatalan dibedakan.
+
+Sesi tetap **20 menit dari koneksi**, tidak diperpanjang load/status/revisi. Cleanup periodik dan validasi tiap endpoint menghapus/cancel job saat sesi hilang/expired; tidak ada pekerjaan yang menyimpan token setelah sesi pemiliknya berakhir. Disconnect menghapus job/cache/sesi; pindah Fanpage frontend mengirim stop dan menolak respons generasi lama. Job idle dibuang, bukan dilanjutkan tanpa akhir. Cache audit akhir juga habis saat restart/disconnect/expiry. Angka byte adalah budget serialisasi/reservasi konservatif, bukan ukuran heap Python pasti; kandidat diterima dibatasi sebelum insertion.
 
 Thumbnail hanya HTTPS pada fbcdn.net/fbsbx.com dan subdomainnya. Permalink hanya HTTPS Facebook/fb.watch; URL berkredensial, skema lain, query token, dan token yang terefleksi ditolak. CSP hanya memperluas **img-src** ke CDN tersebut; script-src/connect-src tetap origin sendiri. Gambar lazy-loaded dan memakai no-referrer. Teks API menggunakan textContent. Tidak menjanjikan bebas rate limit.
 
@@ -115,7 +124,7 @@ Tekan `Ctrl+C` untuk berhenti. Sesi hilang saat server restart. Menambahkan `--r
 4. Hasil kosong menampilkan pesan tersendiri, tanpa keberhasilan menyesatkan. Hasil kosong tidak otomatis berarti token invalid.
 5. Refresh membaca daftar dari memori backend, tanpa request tambahan ke Meta. **Putuskan Koneksi** menghapus sesi/token backend dan cookie sesi. Cookie identitas browser tanpa token tetap ada untuk pembatas lokal, lalu kedaluwarsa sendiri.
 
-Load Posts aktif setelah sesi dan Fanpage tersedia. Hapus Terpilih/Berhenti tetap nonaktif. Kemunculan Fanpage tidak membuktikan izin menghapus. Page tanpa page token tetap muncul pada dropdown tetapi Load Posts ditolak dengan pesan yang jelas.
+Load Posts aktif setelah sesi dan Fanpage tersedia. Hapus Terpilih tetap nonaktif; Berhenti hanya untuk pemuatan. Kemunculan Fanpage tidak membuktikan izin menghapus. Page tanpa page token tetap muncul pada dropdown tetapi Load Posts ditolak dengan pesan yang jelas.
 
 ## Endpoint dan keamanan
 
@@ -126,7 +135,11 @@ Load Posts aktif setelah sesi dan Fanpage tersedia. Hapus Terpilih/Berhenti teta
 | `GET /api/session` | Status dari memori; bootstrap identitas browser bila diperlukan |
 | `POST /api/connect` | Body JSON `{"token":"…"}`; mengganti sesi setelah daftar lengkap |
 | `POST /api/disconnect` | Menghapus sesi dan cookie sesi, tanpa request Meta |
-| `POST /api/posts/load` | Memuat kandidat audit dengan page token pemilik dari backend |
+| `POST /api/posts/jobs` | Memulai pekerjaan lokal dengan Page ID/limit |
+| `POST /api/posts/jobs/{id}/step` | Melanjutkan revisi pekerjaan pemilik dengan batas langkah |
+| `GET /api/posts/jobs/{id}` | Progres dari memori, tanpa Meta |
+| `POST /api/posts/jobs/{id}/stop` | Menghentikan pemuatan, tanpa DELETE |
+| `POST /api/posts/load` | Jalur kompatibilitas satu operasi; tidak digunakan UI |
 | `GET /api/posts?page_id=…` | Hasil audit terakhir dari memori pemilik saja |
 
 API membutuhkan `X-Fanpage-Client: 1`. POST juga membutuhkan `Origin` persis sama dengan `APP_ORIGIN`. `Sec-Fetch-Site` lintas origin ditolak; host hanya `127.0.0.1`, klien hanya loopback, tanpa CORS wildcard. ID sesi hanya dibaca dari cookie, bukan query/body. Cookie sesi dan browser berisi ID acak opaque 256 bit, `HttpOnly`, `SameSite=Strict`, `Path=/`, tanpa `Domain`. Cookie sesi harus cocok dengan identitas browser pemiliknya.
@@ -202,7 +215,7 @@ Tidak perlu pytest atau paket tambahan:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m py_compile app.py config.py errors.py sessions.py graph_api.py content.py content_cache.py
+.\.venv\Scripts\python.exe -m py_compile app.py config.py errors.py sessions.py graph_api.py content.py content_cache.py content_jobs.py
 ```
 
 Jika Node tersedia, tes frontend tanpa npm install:
@@ -229,10 +242,13 @@ Invoke-RestMethod http://127.0.0.1:8000/api/session -Headers @{'X-Fanpage-Client
 - `graph_api.py`: Graph client, pagination, retry, inspeksi usage.
 - `sessions.py`: memori sesi/browser, limiter/reservasi/cooldown.
 - `errors.py`: pesan Indonesia dan kode error aman.
+- `content_jobs.py`: pekerjaan bertahap, cursor backend, revisi idempotent, TTL/capacity/stop.
 - `content.py`, `content_cache.py`: listing/normalisasi/dedup/sort kandidat dan cache audit bounded.
 - `templates/index.html`, `static/style.css`, `static/app.js`: halaman responsif.
+- `tests/test_jobs.py`: regresi pekerjaan bertahap, ribuan kandidat, cursor, timeout/cooldown/stop/expiry/ownership.
 - `tests/test_app.py`, `tests/test_content.py`, `tests/frontend.test.cjs`: regresi koneksi, konten HTTP mock, dan interaksi frontend.
 - `docs/stage2-plan.md`: rencana implementasi dan review tahap ini.
 - `docs/stage3-plan.md`: bukti sumber dan rencana tahap audit.
+- `docs/resumable-load-plan.md`: rancangan dan batas pekerjaan bertahap serta hambatan bukti Story.
 - `docs/load-efficiency-plan.md`: bukti, policy efisiensi, dan rencana regresi perbaikan Load Posts.
 - `requirements.txt`, `.gitignore`: versi paket dan pengecualian rahasia/cache/runtime.
