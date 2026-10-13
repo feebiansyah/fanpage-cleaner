@@ -114,13 +114,14 @@ class SingleDelete:
         for job in self.store.content_jobs.entries.values():
             if job.page_id == page_id and story_ids.intersection(job.story_ids):
                 raise AppError('identified_story', 409)
-        link = safe_url(item.get('permalink'), False, [session.user_token, page.access_token])
-        if link is None:
-            raise AppError('post_permalink_missing', 409)
         if operation_scope=='reel_video':
             # A merged audit row may carry the Post permalink. The manual link opens
             # the exact original Reel ID; it is never used to derive a DELETE target.
             link='https://www.facebook.com/reel/'+node
+        else:
+            link = safe_url(item.get('permalink'), False, [session.user_token, page.access_token])
+            if link is None:
+                raise AppError('post_permalink_missing', 409)
         name = next(p['name'] for p in session.metadata() if p['id'] == page_id)
         target = {'key': key, 'target_id': node, 'page_id': page_id, 'page_name': name,
                   'kind': item.get('kind') or 'Jenis tidak tersedia', 'text': item.get('text', '')[:500],

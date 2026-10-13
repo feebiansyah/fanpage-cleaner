@@ -77,6 +77,20 @@ class ReelFixture:
 
 
 class SingleReel(ReelFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_without_upstream_permalink_uses_original_reel_id(self):
+        for permalink in ('', None):
+            with self.subTest(permalink=permalink):
+                item = {**reel(), 'object_id': '00987', 'permalink': permalink,
+                        'sources': [{'source': 'video_reels', 'object_id': '00987'}]}
+                self.audit['items'] = [item]
+                self.seed()
+                response = await self.prepare()
+                self.assertEqual(response.status_code, 200, response.text)
+                target = response.json()['target']
+                self.assertEqual(target['target_id'], '00987')
+                self.assertEqual(target['permalink'], 'https://www.facebook.com/reel/00987')
+        self.assertEqual(self.calls, [])
+
     async def test_preview_original_reel_without_published_post(self):
         response = await self.prepare()
         self.assertEqual(response.status_code, 200, response.text)
@@ -110,7 +124,7 @@ class SingleReel(ReelFixture, unittest.IsolatedAsyncioTestCase):
             {'sources':[{'source':'video_reels','object_id':'11_987'}]},
             {'sources':[{'source':'video_reels','object_id':'987'},{'source':'video_reels','object_id':'988'}]},
             {'sources':[{'source':'video_reels','object_id':'987','post_id':'22_123'}]},
-            {'object_id':'999'}, {'permalink':'http://www.facebook.com/reel/987'},
+            {'object_id':'999'},
             {'sources':[{'source':'video_reels','object_id':'987','post_id':'11_123'},
                         {'source':'published_posts','object_id':'11_124'}]} ]
         for changes in cases:
