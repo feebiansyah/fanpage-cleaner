@@ -23,9 +23,11 @@ class AuditCache:
         self.entries: dict[str, CachedAudit] = {}
         self.reservations: dict[str, int] = {}
         self.pages = {}
+        self.removed_posts = {}  # Bounded tombstones: stale snapshots cannot restore successes.
 
     def cleanup(self, active_sessions):
         now = time.monotonic()
+        self.removed_posts = {key: expiry for key, expiry in self.removed_posts.items() if expiry > now}
         for sid, entry in list(self.entries.items()):
             if sid not in active_sessions or entry.expires_at <= now:
                 del self.entries[sid]
@@ -51,6 +53,7 @@ class AuditCache:
         self.reservations[sid] = limit
 
     def put(self, sid, result, session_expiry):
+        result = self.filter_removed(result)
         reservation = self.reservations.get(sid)
         if reservation is None or result["displayed"] > reservation:
             raise AppError("audit_capacity", 503)
@@ -68,7 +71,33 @@ class AuditCache:
         entry = self.pages.get((sid,page_id)) or self.entries.get(sid)
         if not entry or entry.expires_at <= time.monotonic() or entry.data["page_id"] != page_id:
             return None
-        return {**entry.data, "cache_ttl_seconds": max(0, int(entry.expires_at - time.monotonic()))}
+        return {**self.filter_removed(entry.data), "cache_ttl_seconds": max(0, int(entry.expires_at - time.monotonic()))}
+
+    def is_removed(self, item, page_id):
+        identities = {item.get('object_id')}
+        for source in item.get('sources', []):
+            if isinstance(source, dict):
+                if source.get('source') == 'published_posts': identities.add(source.get('object_id'))
+                if source.get('source') == 'video_reels': identities.add(source.get('post_id'))
+        now = time.monotonic()
+        return any(self.removed_posts.get((page_id, value), 0) > now for value in identities if isinstance(value, str))
+
+    def filter_removed(self, result):
+        items = [item for item in result['items'] if not self.is_removed(item, result['page_id'])]
+        if len(items) == len(result['items']):
+            return result
+        dated = sum(bool(item.get('published_at')) for item in items)
+        return {**result, 'items': items, 'displayed': len(items),
+                'found': max(len(items), result.get('found', len(result['items'])) - (len(result['items'])-len(items))),
+                'dated_count': dated, 'undated_count': len(items)-dated}
+
+    def invalidate_post(self, page_id, target_id):
+        # Kept longer than any session/audit/load snapshot; bounded before dispatch.
+        self.removed_posts[(page_id, target_id)] = time.monotonic()+self.settings.session_ttl+self.settings.audit_ttl
+        for entry in self._all_entries():
+            if entry.data['page_id'] == page_id:
+                entry.data = self.filter_removed(entry.data)
+                entry.size = len(json.dumps(entry.data, ensure_ascii=False).encode('utf-8'))
 
     def discard(self, sid):
         self.entries.pop(sid, None)
@@ -82,3 +111,4 @@ class AuditCache:
         self.entries.clear()
         self.reservations.clear()
         self.pages.clear()
+        self.removed_posts.clear()

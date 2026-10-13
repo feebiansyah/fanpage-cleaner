@@ -331,6 +331,7 @@ class ContentLoader:
         linked_post = identifier(item.get("post_id")) if is_reel else None
         date = None if is_reel else publication_date(item.get("created_time"))
         return {"key": edge + ":" + raw_id, "object_id": raw_id, "page_id": page_id, "kind": kind,
+                "post_status_type": "mobile_status_update" if not is_reel and status_type == "mobile_status_update" else None,
                 "sources": [{"source": edge, "object_id": raw_id, **({"post_id":linked_post} if linked_post else {})}],
                 "publication_basis": "post_created_time" if date else "unknown",
                 "text": redact(item.get("description") if is_reel else item.get("message"), secrets),

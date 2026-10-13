@@ -66,12 +66,15 @@ class MemoryStore:
         self.audits = AuditCache(settings)
         self.content_jobs = None
         self.bulk_queue = None
+        self.single_delete = None
         self.governor = RequestGovernor(self,settings)
 
     def cleanup(self):
         now = time.monotonic()
         for key in [key for key, session in self.sessions.items() if session.expires_at <= now]:
             del self.sessions[key]
+        if self.single_delete is not None:
+            self.single_delete.cleanup()
         if self.content_jobs is not None:
             self.content_jobs.cleanup()
         if self.bulk_queue is not None:
@@ -249,6 +252,9 @@ class MemoryStore:
         self.audits.release(session_id)
 
     def clear(self):
+        if self.single_delete is not None:
+            self.single_delete.confirmations.clear()
+            self.single_delete.diagnostics.clear()
         if self.content_jobs is not None:
             self.content_jobs.clear()
         for browser in self.browsers.values():

@@ -120,7 +120,8 @@ class ContentJobs:
         return job
 
     def _items(self, job):
-        return self.loader._merge(job.sources[:2])
+        items, unlinked = self.loader._merge(job.sources[:2])
+        return [item for item in items if not self.store.audits.is_removed(item, job.page_id)], unlinked
 
     def snapshot(self, job):
         items, unlinked = self._items(job)
@@ -155,7 +156,7 @@ class ContentJobs:
                   'bulk_selectable': bool(selected), 'selection_purpose': 'audit_only',
                   'story_exclusion': 'matched_ids_only' if job.story_complete else 'unverified',
                   'limitations': limitations,
-                  'warning': AUDIT_WARNING + ' Pilihan hanya untuk audit, termasuk hasil parsial; pengecualian Story seluruh kandidat belum terbukti. Penghapusan tidak tersedia.'}
+                  'warning': AUDIT_WARNING + ' Pilihan untuk audit, termasuk hasil parsial; pengecualian Story seluruh kandidat belum terbukti. Hapus satu Post memerlukan pemeriksaan dan konfirmasi manual terpisah; bulk tetap nonaktif.'}
         if job.errors:
             result['error'] = job.errors[0]
         if job.terminal:

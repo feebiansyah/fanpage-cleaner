@@ -1,8 +1,15 @@
 """Error tetap: tidak pernah menyertakan input, exception, atau pesan Meta."""
 
 MESSAGES = {
+    "invalid_single_delete": "Pilih tepat satu key Post audit; ID atau token bebas tidak diterima.",
+    "post_delete_unsupported": "Hanya Post teks dengan jenis yang dikenali, satu identitas asli published_posts, dan link Facebook yang didukung. Muat ulang jika audit lama belum memiliki metadata jenis. Story, Foto, Video, Reel, jenis tidak diketahui, atau identitas ambigu ditolak.",
+    "confirmation_not_found": "Konfirmasi tidak tersedia, sudah kedaluwarsa, atau bukan milik sesi browser ini.",
+    "confirmation_expired": "Konfirmasi kedaluwarsa. Periksa kembali target sebelum menyiapkan konfirmasi baru.",
+    "confirmation_used": "Konfirmasi sudah digunakan. DELETE tidak dikirim ulang.",
+    "target_busy": "Target yang sama sedang diproses oleh operasi lain. Tidak ada DELETE tambahan.",
+    "delete_capacity": "Kapasitas konfirmasi atau catatan penghapusan lokal penuh. Tunggu hingga kedaluwarsa.",
     "invalid_selection": "Pilihan harus berisi Page ID dan key dari hasil audit milik sesi saja.",
-    "audit_expired": "Hasil audit tidak tersedia atau kedaluwarsa. Muat ulang konten sebelum dry run.",
+    "audit_expired": "Hasil audit tidak tersedia atau kedaluwarsa. Muat ulang konten sebelum pemeriksaan atau penghapusan.",
     "dry_job_not_found": "Pekerjaan dry run tidak tersedia pada sesi browser ini.",
     "dry_capacity": "Kapasitas antrean/checkpoint penuh. Tunggu atau kurangi pilihan.",
     "checkpoint_failed": "Checkpoint tidak dapat disimpan. Dispatch dihentikan; tidak ada penghapusan.",

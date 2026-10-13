@@ -42,6 +42,71 @@ class GraphClient:
         self.settings = settings
         self.store = store
 
+    async def delete_post_once(self, target_id, token_key, deadline, token_at_dispatch):
+        """Strict v26 Page Post contract. One send; never calls the GET retry helper."""
+        if not re.fullmatch(r'[0-9]{1,40}(?:_[0-9]{1,40})?', target_id):
+            raise AppError('post_delete_unsupported', 409)
+        status, code, subcode, instruction = None, None, None, None
+        def result(outcome, reason, wait=None):
+            return {'outcome':outcome, 'reason':reason, 'http_status':status,
+                    'error_code':code, 'error_subcode':subcode, 'retry_after':wait}
+        async with self.store.governor.slot(token_key, deadline):
+            # Session/audit/confirmation may expire while waiting. Fetch token only now.
+            token = token_at_dispatch()
+            endpoint = 'https://graph.facebook.com/v26.0/'+target_id
+            try:
+                remaining = deadline-time.monotonic()
+                if remaining <= 0:
+                    raise AppError('confirmation_expired',409)
+                async def send():
+                    nonlocal status, instruction
+                    async with self.http.stream('DELETE', endpoint, headers={'Authorization':'Bearer '+token}) as response:
+                        status = response.status_code
+                        self._usage(response.headers, token_key)
+                        instruction = retry_after(response.headers.get('retry-after'))
+                        if instruction is not None:
+                            # Install before releasing the shared permit, even with invalid body.
+                            self.store.cooldown(token_key, instruction, global_scope=status==429)
+                        if status == 429:
+                            self.store.cooldown(token_key, max(instruction or 0,self.settings.cooldown_seconds),True)
+                        body = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            if len(body)+len(chunk)>self.settings.max_response_bytes:
+                                return None
+                            body.extend(chunk)
+                        try:
+                            return json.loads(body)
+                        except (ValueError,UnicodeError,RecursionError):
+                            return None
+                payload = await asyncio.wait_for(send(), min(remaining, self.settings.request_timeout))
+            except (asyncio.TimeoutError, httpx.TimeoutException):
+                return result('uncertain','timeout_after_send')
+            except httpx.HTTPError:
+                return result('uncertain','network_after_send')
+            finally:
+                token = ''
+            error = payload.get('error') if isinstance(payload,dict) else None
+            if isinstance(error,dict):
+                code = error.get('code') if type(error.get('code')) is int else None
+                subcode = error.get('error_subcode') if type(error.get('error_subcode')) is int else None
+                # Only bounded numeric diagnostics, never Meta message/type/payload.
+                code = code if code is not None and 0 <= code <= 2147483647 else None
+                subcode = subcode if subcode is not None and 0 <= subcode <= 2147483647 else None
+            if status==429 or code in {4,17,32,613,80001,80002,80003,80004,80005,80006}:
+                seconds=max(instruction or 0,self.settings.cooldown_seconds)
+                self.store.cooldown(token_key,seconds,global_scope=code!=17)
+                return result('failed','rate_limited',math.ceil(seconds))
+            if code in {102,190} or status==401:
+                return result('failed','token_invalid')
+            if code in {10,200} or status==403:
+                return result('failed','permission_denied')
+            if (200 <= status < 300 and isinstance(payload,dict)
+                    and 'error' not in payload and payload.get('success') is True):
+                return result('succeeded','success_boolean_true')
+            if isinstance(error,dict) and 400 <= status < 500:
+                return result('failed','upstream_error')
+            return result('uncertain','response_unverified')
+
     async def accounts(self, token: str, token_key: str):
         pages = {}
         seen_cursors = set()
@@ -246,7 +311,10 @@ class GraphClient:
                 raise failure from None
             if wait > self.settings.max_retry_wait or time.monotonic() + wait >= deadline:
                 raise AppError("timeout", 504)
-            await asyncio.sleep(wait)
+            retry_at = time.monotonic()+wait
+            # Windows asyncio timers may wake early; honor the actual deadline.
+            while time.monotonic() < retry_at:
+                await asyncio.sleep(retry_at-time.monotonic())
         raise AppError("upstream_error", 502)
 
     @asynccontextmanager

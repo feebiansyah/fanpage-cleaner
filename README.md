@@ -1,10 +1,35 @@
 # Fanpage Cleaner
 
-Aplikasi FastAPI + Jinja2 satu halaman berbahasa Indonesia. Koneksi tahap 2 menerima **Facebook user access token** dan daftar Fanpage lewat `GET /me/accounts`. Tahap 3 menambahkan **Load Posts untuk audit**. Tidak ada OAuth, pertukaran/perpanjangan token, database, data konten contoh, atau penghapusan. Seluruh request aplikasi ke Meta tetap GET, tanpa DELETE.
+Aplikasi FastAPI + Jinja2 satu halaman berbahasa Indonesia. Koneksi menerima **Facebook user access token** dan daftar Fanpage lewat `GET /me/accounts`. Load Posts mengambil kandidat untuk audit. Tahap 5 menambahkan **Hapus 1 Post biasa** melalui konfirmasi manual di web lokal. Bulk delete, delete Reel/video, OAuth, database, dan perpanjangan token tidak tersedia.
+
+## Status tahap 5
+
+**Hapus 1 Post** mendukung tepat satu **Post teks/status** berjenis **Postingan**, dengan metadata `status_type=mobile_status_update` yang memang diminta oleh loader, satu identitas asli dari provenance `published_posts`, milik sesi/Page pengguna, audit belum kedaluwarsa, dan link Facebook valid. Allowlist jenis ini kebijakan scope lokal, bukan daftar semua jenis Post yang Meta dapat hapus. Jenis hilang/tidak diketahui, share/link dengan status lain, Foto, Video, Reel (termasuk Reel yang digabung dengan Post), Story teridentifikasi, dan identitas ambigu belum didukung. Audit yang dimuat sebelum perubahan metadata ini perlu dimuat ulang. Tidak ada ID sintetis, batch delete, atau penghapusan lewat antrean.
+
+Dasar resmi: [Pages API Posts — Delete a Post](https://developers.facebook.com/documentation/pages-api/posts), **isi bagian yang diberikan pengguna setelah membuka halaman di browser**: `DELETE /v26.0/{page_post_id}` memakai ID Post asli; sukses `{"success":true}`. Bagian Before you start menetapkan Page access token, daftar permissions termasuk `pages_manage_posts` dan `pages_read_engagement`, serta tugas pengguna pada Page. **Daftar panduan bukan klaim izin minimum khusus DELETE**, dan Page muncul pada `/me/accounts` bukan jaminan izin menghapus. Fetch dokumentasi dari alat ini masih gagal; asal bukti serta batasnya dicatat di [verifikasi tahap 5](docs/stage5-api-verification.md).
+
+Pemeriksaan Story tetap mengecualikan ID teridentifikasi, tetapi satu halaman **tidak membuktikan seluruh kandidat bebas Story**. Untuk percobaan satu Post, pengguna harus membuka link, memeriksa target, dan mengonfirmasi bahwa itu Post biasa yang memang ingin dihapus, bukan Story. Ini **konfirmasi manual target**, bukan verifikasi otomatis cakupan Story. `safe_for_delete` hasil load dan kelayakan bulk tetap false; konfirmasi manual tidak membuka bulk.
+
+### Cara mencoba satu Post melalui web
+
+1. Jalankan satu proses server sesuai perintah Windows di bawah. Hubungkan token, pilih Fanpage, dan coba Load Posts limit **20** atau **100**. Tunggu selesai atau hentikan pemuatan agar audit tersimpan.
+2. Pilih **tepat satu** Post teks berjenis **Postingan** dengan jenis yang dikenali, lalu klik **Hapus 1 Post**. Tombol nonaktif untuk pilihan kosong/ganda, metadata jenis tidak diketahui, atau jenis yang belum didukung.
+3. Dialog menampilkan nama Fanpage, jenis, tanggal, teks singkat, link, dan **ID Post asli**. Buka link dan pastikan target yang tepat adalah Post biasa, bukan Story. Jika ragu, klik **Batal**.
+4. Centang pernyataan pemeriksaan manual, lalu tekan **Konfirmasi Hapus** hanya jika memang ingin menghapus. **Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.** Menyiapkan dialog atau mencentang saja belum mengirim DELETE.
+5. Sukses hanya jika HTTP 2xx, JSON object memiliki `success` boolean true, dan tidak memiliki field `error`. Post dikeluarkan dari daftar/pilihan lokal dan cache terkait. HTTP 200 saja, false, string `"true"`, angka 1, kosong, rusak, atau bentuk lain bukan sukses.
+6. Gagal atau **uncertain** mempertahankan Post. Timeout/network setelah request mungkin terkirim tidak diulang otomatis. Bila respons lokal hilang, periksa Facebook manual sebelum mempertimbangkan percobaan baru. Tidak ada GET sebelum/sesudah penghapusan rutin.
+
+Backend menerima `{page_id, keys:[key]}` untuk menyiapkan konfirmasi; token/ID target bebas ditolak. Eksekusi hanya menerima `{confirmation_id, manual_target_confirmed:true}`; tidak menerima target pengganti. ID konfirmasi acak 256 bit, terikat browser/sesi dan snapshot identitas/metadata, **TTL maksimal 60 detik**, single-use, tidak memperpanjang sesi 20 menit. Audit/Page/token diperiksa ulang sebelum dispatch setelah penantian governor. Disconnect/sesi habis sebelum dispatch mencegah DELETE. Request yang mungkin sudah terkirim tidak dapat ditarik kembali; respons lama tidak ditampilkan pada Fanpage/sesi baru.
+
+DELETE memakai Page token backend pada header Authorization, AsyncClient bersama, concurrency global **2**, pacing awal **1 detik**, usage/cooldown/Retry-After bersama. **Satu kali pengiriman tanpa retry otomatis**, termasuk bila respons rusak/transient. Lock `post:ID_ASLI` sama dengan dry run, sehingga target sama lintas browser/pekerjaan tidak bersamaan. Tidak ada transport delete untuk antrean. Versi jalur single delete ditetapkan **v26.0** sesuai bukti, terpisah dari konfigurasi versi GET.
+
+Konfirmasi dibatasi **200 global / 10 per sesi**, dibersihkan saat TTL/sesi habis; metadata tanpa salinan token. Diagnostik aman disimpan **di memori saja, 200 catatan terakhir**, berisi operasi, ID target, HTTP status, kode/subkode numerik terpilih, durasi, dan outcome; tidak ada token/header/exception/response mentah. Tidak ada endpoint untuk melihat diagnostik browser lain. Tombstone sukses dibatasi `MAX_AUDIT_ITEMS` (default 20000), kapasitas diperiksa sebelum dispatch termasuk operasi aktif; TTL `SESSION_TTL + AUDIT_TTL` (default 1500 detik), mencegah snapshot cache/job lama memunculkan target kembali. Semua state ini hilang saat restart; tidak ada pemulihan/retry otomatis single delete.
+
+Pengujian tahap 5 memakai **mock HTTP/token dummy dan DOM/fetch simulasi**. Penghapusan Facebook nyata belum dicoba oleh agen; pengguna yang menekan konfirmasi setelah review.
 
 ## Tahap 4: antrean dan Dry Run saja
 
-**Tidak ada penghapusan nyata, request DELETE, batch mutation, transport delete, atau endpoint/config untuk mengaktifkannya.** Executor runtime hanya memeriksa identitas/metadata lokal. Jangan menafsirkan dry_run_checked sebagai berhasil dihapus.
+**Antrean tetap dry run saja**, tidak mengirim DELETE/batch mutation dan tidak mempunyai konfigurasi untuk mengaktifkan bulk. Executor antrean hanya memeriksa identitas/metadata lokal; `dry_run_checked` bukan berhasil dihapus. Jalur satu Post tahap 5 terpisah dari executor antrean.
 
 Cara mencoba: hubungkan sesi, Load Posts limit 100, pilih **5 checkbox**, lalu klik **Periksa Penghapusan (Dry Run)**. Ringkasan menampilkan nama Page, jumlah dipilih, unik, layak, belum layak/ambigu, duplikat, progres dan target konkret. Hapus Terpilih tetap nonaktif. Berhenti memuat dan Berhenti dry run menggunakan tombol yang sama dengan label berbeda. Memilih Page lain membatalkan tampilan/pekerjaan dry run lama. Status dan halaman hasil dry run dibaca dari memori backend, tanpa Meta; pagination daftar Load Posts tetap array lokal 50 item. Tidak ada estimasi waktu penghapusan.
 
@@ -14,7 +39,7 @@ Frontend mengirim `{"selections":[{"page_id":"11","keys":["published_posts:11_1"
 
 Key tampilan, object_id sumber, canonical identity, dan delete_target terpisah. [SDK resmi PagePost](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/pagepost.py) memiliki api_delete pada node ID asli. Itu hanya dasar **usulan** target Post, bukan bukti izin/Story/keberhasilan. ID tidak diubah atau digabung menjadi Page_Post. Relasi post_id disimpan persis dari field Reels yang memang diminta, tanpa mengubah format; pencocokan berbeda format tetap tidak diasumsikan sama. Reel tanpa dasar Post memiliki delete_target=null dan alasan reel_delete_semantics_unverified. Tidak ada request validasi per item.
 
-Dokumentasi Page Post/Reels Meta kembali memberi 429. SDK tidak membuktikan published_posts/video_reels bebas Story, dan pemeriksaan Story satu halaman tidak membuktikan seluruh kandidat bebas Story. **Saat ini target hasil Facebook belum dapat dinyatakan layak dihapus**: alasan per target mencakup story_exclusion_unverified, delete_permissions_unverified, success_semantics_unverified, dan bila relevan relasi Reel ambigu. Story teridentifikasi ditolak dengan alasan spesifik. Identitas boleh diperiksa secara dry run walaupun kelayakan delete terhalang. Ketidakpastian dinilai per target dan tidak menghentikan pemeriksaan target lain; safe_for_delete selalu false. Kemunculan Page pada /me/accounts bukan bukti izin menghapus.
+SDK tidak membuktikan published_posts/video_reels bebas Story, dan pemeriksaan Story satu halaman tidak membuktikan seluruh kandidat bebas Story. **Kriteria dry run/bulk tahap 4 tetap konservatif**: alasan per target tetap mencakup story_exclusion_unverified, delete_permissions_unverified, success_semantics_unverified, dan bila relevan relasi Reel ambigu. Label lama ini belum diperbarui menjadi kelayakan bulk oleh bukti single Post; jalur tahap 5 memakai kriteria percobaan dan konfirmasi manual terpisah. Story teridentifikasi ditolak. Ketidakpastian satu target tidak menghentikan pemeriksaan lainnya; safe_for_delete hasil audit selalu false. Kemunculan Page pada /me/accounts bukan bukti izin menghapus.
 
 ### Antrean, worker dan pacing
 
@@ -28,7 +53,7 @@ Konfigurasi: DRY_WORKERS=2, GRAPH_REQUEST_CONCURRENCY=2, GRAPH_REQUEST_INTERVAL=
 
 ### Kontrak hasil dan checkpoint
 
-State target: queued, processing, dry_run_checked, failed, uncertain, cancelled; succeeded disediakan pada schema untuk rancangan berikutnya, **tidak dihasilkan executor runtime**. Temporary failure sebelum pengiriman dapat dicoba maksimal tiga percobaan, dengan hitungan tersimpan. Token invalid/izin tidak diulang. Timeout atau hasil tidak jelas setelah request dikirim menjadi uncertain tanpa retry buta. Pure classifier tahap berikutnya belum menganggap HTTP 2xx sebagai sukses hapus karena semantik resmi belum dapat diverifikasi. Tidak ada GET sebelum/sesudah tiap target, dan tidak ada asumsi semua DELETE idempotent.
+State antrean: queued, processing, dry_run_checked, failed, uncertain, cancelled; succeeded disediakan pada schema untuk rancangan berikutnya, **tidak dihasilkan executor dry run**. Temporary failure pemeriksaan sebelum pengiriman dapat dicoba maksimal tiga percobaan, dengan hitungan tersimpan. Token invalid/izin tidak diulang. Kontrak bulk/classifier tahap 4 tetap konservatif, tidak diaktifkan oleh tahap 5. Single Post mempunyai classifier ketat terpisah dan tidak memakai retry antrean/GET. Tidak ada asumsi semua DELETE idempotent.
 
 Checkpoint pada folder tetap `runtime/dry-run/` yang sudah diabaikan Git. Format versi 1, nama UUID backend, schema allowlist; tidak menyimpan token user/Page, cookie, session ID, Authorization, cursor, nama/teks/permalink konten, respons Meta mentah. Owner UUID internal nonrahasia terpisah dari credential sesi. Manifest ditulis atomik dengan fsync + replace; progres ditulis sebagai shard maksimal **256 target** dengan generation manifest, sehingga tidak menulis ulang 50000 target pada tiap transisi. Processing dicatat sebelum executor dan hasil setelahnya. Generation lama diabaikan setelah manifest diperbarui.
 
@@ -36,7 +61,7 @@ Batas checkpoint: **100 manifest**, maksimal 196 shard per job pada kapasitas 50
 
 Saat disconnect/sesi habis/shutdown, dispatch baru berhenti; processing menjadi uncertain dan target belum diproses tetap tercatat tanpa token. Sesi tetap **20 menit**, tidak diperpanjang dry run/status. Setelah restart semua record yang dibaca menjadi **paused_needs_reconnect**, processing crash menjadi uncertain. Tidak ada eksekusi otomatis atau pemulihan owner dari Page ID yang sama. **Mekanisme pemulihan ownership eksplisit belum tersedia; checkpoint belum dapat dilanjutkan atau diakses lewat UI/browser baru.** Record disimpan untuk audit nonrahasia, bukan bearer credential.
 
-Endpoint baru: POST /api/dry-run/jobs (keys saja), GET /api/dry-run/jobs/{id}?offset=0 (50 hasil dari memori), POST /api/dry-run/jobs/{id}/stop. Semuanya memerlukan cookie pemilik serta perlindungan origin/client/no-store yang sama. Job ID saja tidak memberi akses. Tidak ada endpoint delete nyata.
+Endpoint dry run: POST /api/dry-run/jobs (keys saja), GET /api/dry-run/jobs/{id}?offset=0 (50 hasil dari memori), POST /api/dry-run/jobs/{id}/stop. Semuanya memerlukan cookie pemilik serta perlindungan origin/client/no-store yang sama. Job ID saja tidak memberi akses. Tidak ada endpoint bulk delete.
 
 Gunakan **satu proses Uvicorn --workers 1** sesuai perintah di bawah. Jangan menambah worker Uvicorn untuk mempercepat antrean; beberapa proses tidak berbagi locks/limiter/sesi. Aplikasi tetap localhost, bukan akses banyak perangkat.
 
@@ -53,7 +78,7 @@ Pengujian tahap ini hanya mock/fake transport dan target dummy. Tes memasukkan *
 7. **Berhenti** menghentikan pemuatan, mempertahankan halaman diterima untuk audit, dan menghentikan langkah lanjutan. Memilih Fanpage lain membatalkan pekerjaan lama dan membersihkan audit. Disconnect/sesi habis menghapus pekerjaan dan token sesi; respons lama tidak ditampilkan.
 8. Setelah hasil 100 diperiksa, coba **3000**. Baca alasan berhenti per sumber; hasil boleh kurang dari maksimum akibat sumber habis, izin, batas lokal, atau error. Jangan menyimpulkan penyebab hasil nyata 1600 posts + 543 Reels selain timeout yang memang dilaporkan pengguna; diagnosis baru membantu pemeriksaan berikutnya.
 
-**Hapus Terpilih tetap nonaktif; tidak ada request DELETE.** Pemilihan untuk audit dipisahkan dari pengecualian Story dan kelayakan penghapusan. Thumbnail hitam/perilaku gambar tidak diubah.
+**Hapus Terpilih tetap nonaktif.** Hapus 1 Post hanya tersedia melalui dialog konfirmasi manual tahap 5, bukan sebagai kelayakan otomatis dari checkbox audit. Thumbnail hitam/perilaku gambar tidak diubah.
 
 ## Sumber API tahap 3 dan bukti
 
@@ -164,7 +189,7 @@ Tekan `Ctrl+C` untuk berhenti. Sesi hilang saat server restart. Menambahkan `--r
 4. Hasil kosong menampilkan pesan tersendiri, tanpa keberhasilan menyesatkan. Hasil kosong tidak otomatis berarti token invalid.
 5. Refresh membaca daftar dari memori backend, tanpa request tambahan ke Meta. **Putuskan Koneksi** menghapus sesi/token backend dan cookie sesi. Cookie identitas browser tanpa token tetap ada untuk pembatas lokal, lalu kedaluwarsa sendiri.
 
-Load Posts aktif setelah sesi dan Fanpage tersedia. Hapus Terpilih tetap nonaktif; Berhenti hanya untuk pemuatan. Kemunculan Fanpage tidak membuktikan izin menghapus. Page tanpa page token tetap muncul pada dropdown tetapi Load Posts ditolak dengan pesan yang jelas.
+Load Posts aktif setelah sesi dan Fanpage tersedia. Hapus Terpilih tetap nonaktif; Berhenti membedakan pemuatan/dry run. Tidak ada tombol pembatalan request DELETE yang mungkin sudah terkirim. Kemunculan Fanpage tidak membuktikan izin menghapus. Page tanpa page token tetap muncul pada dropdown tetapi load/delete ditolak dengan pesan yang jelas.
 
 ## Endpoint dan keamanan
 
@@ -181,12 +206,14 @@ Load Posts aktif setelah sesi dan Fanpage tersedia. Hapus Terpilih tetap nonakti
 | `POST /api/posts/jobs/{id}/stop` | Menghentikan pemuatan, tanpa DELETE |
 | `POST /api/posts/load` | Jalur kompatibilitas satu operasi; tidak digunakan UI |
 | `GET /api/posts?page_id=…` | Hasil audit terakhir dari memori pemilik saja |
+| `POST /api/posts/delete/prepare` | Snapshot satu Post dari key audit, konfirmasi sekali pakai; tanpa Meta |
+| `POST /api/posts/delete/execute` | Satu DELETE v26.0 setelah konfirmasi manual terikat target/sesi |
 
 API membutuhkan `X-Fanpage-Client: 1`. POST juga membutuhkan `Origin` persis sama dengan `APP_ORIGIN`. `Sec-Fetch-Site` lintas origin ditolak; host hanya `127.0.0.1`, klien hanya loopback, tanpa CORS wildcard. ID sesi hanya dibaca dari cookie, bukan query/body. Cookie sesi dan browser berisi ID acak opaque 256 bit, `HttpOnly`, `SameSite=Strict`, `Path=/`, tanpa `Domain`. Cookie sesi harus cocok dengan identitas browser pemiliknya.
 
 Token user dan Page hanya disimpan dalam memori backend. Cookie tidak berisi token. Frontend tidak memakai localStorage/sessionStorage dan membersihkan input saat request dikirim maupun selesai. Respons koneksi/status Fanpage hanya berisi nama dan ID Page; respons audit berisi metadata konten yang dinormalisasi. Semua teks dirender dengan `textContent` dan rahasia yang terefleksi disamarkan. Respons terkait sesi memakai `Cache-Control: no-store`; CSP membatasi script/koneksi frontend ke origin sendiri.
 
-Tidak ada respons Meta, pesan Meta, Authorization, body token, URL pagination, atau exception mentah yang dikirim ke frontend/dicatat aplikasi. Diagnostik hanya berupa kode lokal, pesan tetap bahasa Indonesia, dan bila relevan `retry_after`/`cause_code` yang dipilih aplikasi.
+Tidak ada respons Meta, pesan Meta, Authorization, body token, URL pagination, atau exception mentah yang dikirim ke frontend/dicatat aplikasi. Diagnostik memakai kode lokal, pesan tetap Indonesia, bila relevan retry_after/cause_code, serta untuk single delete HTTP status/kode-subkode numerik/ID target/durasi/outcome yang dipilih secara aman.
 
 Koneksi baru baru mengganti sesi lama setelah pagination lengkap. Kegagalan parsial tidak disimpan dan sesi lama yang masih berlaku dipertahankan. Status lokal tidak membuktikan token masih valid di Meta karena tidak ada polling/pengecekan ulang. Backend menolak Hubungkan bersamaan dari identitas browser yang sama, termasuk sebelum ada sesi Facebook; frontend wajib bootstrap status dahulu. Dua tab browser yang sama berbagi cookie/sesi. Putus saat koneksi berjalan ditolak agar pekerjaan lama tidak membangkitkan sesi kembali.
 
@@ -255,7 +282,7 @@ Tidak perlu pytest atau paket tambahan:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m py_compile app.py config.py errors.py sessions.py graph_api.py content.py content_cache.py content_jobs.py bulk_targets.py bulk_queue.py bulk_scheduler.py bulk_executor.py bulk_checkpoint.py request_governor.py
+.\.venv\Scripts\python.exe -m py_compile app.py config.py errors.py sessions.py graph_api.py content.py content_cache.py content_jobs.py bulk_targets.py bulk_queue.py bulk_scheduler.py bulk_executor.py bulk_checkpoint.py request_governor.py single_delete.py
 ```
 
 Jika Node tersedia, tes frontend tanpa npm install:
@@ -282,6 +309,7 @@ Invoke-RestMethod http://127.0.0.1:8000/api/session -Headers @{'X-Fanpage-Client
 - `graph_api.py`: Graph client, pagination, retry, inspeksi usage.
 - `sessions.py`: memori sesi/browser, limiter/reservasi/cooldown.
 - `errors.py`: pesan Indonesia dan kode error aman.
+- `single_delete.py`, `tests/test_single_delete.py`: konfirmasi manual sekali pakai, satu Post, lock bersama, diagnostik aman dan mock regresi.
 - `content_jobs.py`: pekerjaan bertahap, cursor backend, revisi idempotent, TTL/capacity/stop.
 - `content.py`, `content_cache.py`: listing/normalisasi/dedup/sort kandidat dan cache audit bounded.
 - `templates/index.html`, `static/style.css`, `static/app.js`: halaman responsif.

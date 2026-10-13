@@ -41,7 +41,7 @@
       </div>
       <label for="max-posts" class="limit-label">Maksimal postingan</label>
       <input id="max-posts" type="number" value="100" min="1" max="5000" step="1" inputmode="numeric" aria-describedby="posts-help">
-      <p class="help" id="posts-help">Maksimal konten unik yang ditampilkan setelah deduplikasi dan pengecualian Story yang teridentifikasi. Tidak ada mode mengambil semua. Penghapusan belum tersedia.</p>
+      <p class="help" id="posts-help">Maksimal konten unik setelah deduplikasi dan pengecualian Story teridentifikasi. Hapus satu Post biasa memerlukan pemeriksaan manual dan konfirmasi terpisah. Penghapusan massal tetap nonaktif.</p>
     </section>
 
     <section class="card" aria-labelledby="content-title">
@@ -65,9 +65,11 @@
       <nav id="local-pagination" class="local-pagination" aria-label="Halaman daftar audit lokal"></nav>
       <div class="actions">
         <button class="danger" type="button" disabled aria-describedby="availability">Hapus Terpilih</button>
+        <button id="delete-one" class="danger" type="button" disabled>Hapus 1 Post</button>
         <button id="dry-run" type="button" disabled>Periksa Penghapusan (Dry Run)</button>
         <button id="stop-load" class="secondary" type="button" disabled aria-describedby="load-status">Berhenti</button>
       </div>
+      <p id="delete-status" class="help" role="status" aria-live="polite">Hapus satu Post teks dengan jenis yang dikenali, setelah pemeriksaan manual. Foto, Video, Reel, Story, jenis tidak diketahui, dan bulk belum didukung.</p>
       <p id="dry-status" class="help" role="status" aria-live="polite">Dry run belum berjalan. Tidak ada penghapusan nyata.</p>
       <div id="dry-results" class="help" aria-label="Hasil pemeriksaan target dry run"></div>
       <nav id="dry-pagination" class="local-pagination" aria-label="Halaman hasil dry run lokal"></nav>
@@ -82,5 +84,19 @@
       <p class="help" id="operation-status" role="status" aria-live="polite">Belum ada operasi konten yang berjalan.</p>
     </section>
   </main>
+  <dialog id="delete-dialog" aria-labelledby="delete-dialog-title" aria-describedby="delete-warning">
+    <h2 id="delete-dialog-title">Konfirmasi Hapus 1 Post</h2>
+    <div id="delete-details"></div>
+    <p id="delete-warning" class="notice">Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.</p>
+    <p class="help">Buka link Facebook dan periksa bahwa target adalah postingan biasa yang memang ingin dihapus, bukan Story. Ini konfirmasi manual Anda; aplikasi belum memverifikasi seluruh cakupan Story secara otomatis.</p>
+    <label class="checkbox-label" for="delete-manual-check">
+      <input id="delete-manual-check" type="checkbox">
+      Saya sudah memeriksa link dan memastikan target adalah Post biasa, bukan Story, serta ingin menghapusnya.
+    </label>
+    <div class="actions">
+      <button id="delete-cancel" class="secondary" type="button">Batal</button>
+      <button id="delete-confirm" class="danger" type="button" disabled>Konfirmasi Hapus</button>
+    </div>
+  </dialog>
 </body>
 </html>

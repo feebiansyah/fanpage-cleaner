@@ -96,19 +96,21 @@ class ConnectionContract(unittest.IsolatedAsyncioTestCase):
         class Operations(HTMLParser):
             def __init__(self):
                 super().__init__()
-                self.buttons, self.disabled = [], []
+                self.buttons, self.disabled = [], {}
             def handle_starttag(self, tag, attrs):
                 attrs = dict(attrs)
                 if tag == "button":
                     self.buttons.append(attrs.get("id"))
                     if attrs.get("id") not in {"connect", "disconnect"}:
-                        self.disabled.append("disabled" in attrs)
+                        self.disabled[attrs.get('id') or 'bulk-delete'] = "disabled" in attrs
                 if tag == "input" and attrs.get("type") == "checkbox":
-                    self.disabled.append("disabled" in attrs)
+                    self.disabled[attrs.get('id')] = "disabled" in attrs
         operations = Operations()
         operations.feed((await self.client.get("/")).text)
-        self.assertEqual(len(operations.buttons), 6)
-        self.assertEqual(operations.disabled, [True, True, True, True, True])
+        self.assertEqual(len(operations.buttons), 9)
+        for control in ['load-posts','select-all','bulk-delete','dry-run','stop-load','delete-one','delete-confirm']:
+            self.assertTrue(operations.disabled[control], control)
+        self.assertFalse(operations.disabled['delete-cancel'])
         graph_http = self.application.state.http
         self.assertFalse(graph_http.follow_redirects)
         self.assertFalse(graph_http.is_closed)
@@ -511,6 +513,23 @@ class ConnectionContract(unittest.IsolatedAsyncioTestCase):
             before = len(self.calls)
             self.error(await self.connect(), "upstream_error")
             self.assertEqual(len(self.calls), before + 3)
+
+    async def test_retry_after_early_timer_does_not_turn_get_retry_into_cooldown_error(self):
+        # Windows timers can wake before the monotonic cooldown deadline.
+        original_sleep = asyncio.sleep
+        woke_early = False
+        async def early_sleep(seconds):
+            nonlocal woke_early
+            if seconds >= .5 and not woke_early:
+                woke_early = True
+                return await original_sleep(seconds-.03)
+            return await original_sleep(seconds)
+        self.responses = [httpx.Response(503, headers={'Retry-After':'1'}),
+                          httpx.Response(200,json={'data':[page()]})]
+        with patch('graph_api.asyncio.sleep', early_sleep):
+            result = await self.connect()
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertEqual(len(self.calls),2)
 
     async def test_chunked_body_size_and_deep_invalid_json_are_safe(self):
         async def chunks():

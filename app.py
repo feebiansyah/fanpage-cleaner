@@ -22,6 +22,7 @@ from bulk_queue import BulkQueue
 from bulk_scheduler import BulkScheduler
 from bulk_checkpoint import Checkpoints
 from bulk_targets import validate_selections
+from single_delete import SingleDelete
 from dataclasses import replace
 
 
@@ -143,6 +144,8 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     application.state.bulk=BulkQueue(application.state.store,settings,Checkpoints(checkpoint_root or BASE_DIR/'runtime'/'dry-run',settings))
     application.state.bulk_scheduler=BulkScheduler(application.state.bulk)
     application.state.store.bulk_queue=application.state.bulk
+    application.state.single_delete=SingleDelete(application.state.store,application.state.bulk)
+    application.state.store.single_delete=application.state.single_delete
     application.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1"])
     application.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
@@ -341,6 +344,23 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         targets,duplicates,pages=validate_selections(application.state.store,browser_id,sid,payload)
         job=application.state.bulk.add(browser_id,sid,targets,duplicates,pages)
         return application.state.bulk.snapshot(job)
+
+    async def single_delete_body(request):
+        check_origin(request,settings,mutation=True)
+        try:
+            return await asyncio.wait_for(read_json(request,settings),settings.connect_timeout)
+        except asyncio.TimeoutError:
+            raise AppError('timeout',504) from None
+
+    @application.post('/api/posts/delete/prepare')
+    async def prepare_single_delete(request: Request):
+        payload=await single_delete_body(request)
+        return application.state.single_delete.prepare(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload)
+
+    @application.post('/api/posts/delete/execute')
+    async def execute_single_delete(request: Request):
+        payload=await single_delete_body(request)
+        return await application.state.single_delete.execute(application.state.graph,request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload)
 
     def owned_dry(request,job_id,mutation=False):
         check_origin(request,settings,mutation=mutation)

@@ -16,12 +16,15 @@ class Element {
   replaceChildren(...items) { this.options = []; this.children = this.options; for (const item of items) this.appendChild(item); }
   appendChild(child) { this.options.push(child); if (this.tag === 'select' && this.options.length === 1) this.value = child.value; }
   focus() { this.focused = true; }
+  showModal() { this.open = true; }
+  close() { this.open = false; }
 }
 
 function setup(responses) {
   const ids = ['facebook-token', 'connect', 'disconnect', 'fanpage', 'page-count', 'availability', 'operation-status',
     'load-posts', 'max-posts', 'content-list', 'select-all', 'selected-count', 'load-status', 'audit-warning', 'local-pagination', 'load-progress',
-    'fanpage-search', 'fanpage-search-status', 'source-diagnostics', 'stop-load', 'dry-run', 'dry-status', 'dry-results', 'dry-pagination'];
+    'fanpage-search', 'fanpage-search-status', 'source-diagnostics', 'stop-load', 'dry-run', 'dry-status', 'dry-results', 'dry-pagination',
+    'delete-one', 'delete-dialog', 'delete-details', 'delete-manual-check', 'delete-cancel', 'delete-confirm', 'delete-status'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id === 'fanpage' ? 'select' : 'div')]));
   elements['max-posts'].value = '100';
   const requests = [];
@@ -47,6 +50,159 @@ const disconnected = {connected: false, state: 'disconnected', pages: [], count:
 const connected = {connected: true, pages: [{id: '11', name: '<img onerror=alert(1)>'}], count: 1,
   message: 'Fanpage berhasil dimuat. Load Posts belum tersedia pada tahap ini.'};
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+function onePostAudit(size = 1) {
+  const data = audit(size);
+  for (const item of data.items) {
+    item.kind = 'Postingan';
+    item.post_status_type = 'mobile_status_update';
+    item.sources = [{source:'published_posts', object_id:item.object_id}];
+  }
+  return data;
+}
+
+function choose(elements, index = 0, checked = true) {
+  const checkbox = elements['content-list'].children[index].children.find(child => child.type === 'checkbox');
+  checkbox.checked = checked;
+  checkbox.events.change();
+}
+
+const preparedPost = {confirmation_id:'random-single-use', expires_in_seconds:60, story_automatically_verified:false,
+  target:{key:'published_posts:11_0', target_id:'11_0', page_id:'11', page_name:'<script>Fanpage</script>',
+    kind:'Postingan', text:'<script>teks</script>', published_wib:'12/10/2026 07:00:00 WIB', permalink:'https://www.facebook.com/11/posts/0'}};
+
+test('single Post requires exact one selection, prepare, manual check and explicit confirmation', async () => {
+  const {elements, requests} = setup([connected, onePostAudit(2), preparedPost,
+    {outcome:'succeeded', target:preparedPost.target, message:'Post berhasil dihapus'}]);
+  await tick();
+  await elements['load-posts'].events.click();
+  assert.equal(elements['delete-one'].disabled,true);
+  choose(elements,0);
+  assert.equal(elements['delete-one'].disabled,false);
+  choose(elements,1);
+  assert.equal(elements['delete-one'].disabled,true);
+  await elements['delete-one'].events.click();
+  assert.equal(requests.length,2);
+  choose(elements,1,false);
+  await elements['delete-one'].events.click();
+  assert.equal(requests[2].path,'/api/posts/delete/prepare');
+  assert.deepEqual(JSON.parse(requests[2].options.body),{page_id:'11',keys:['published_posts:11_0']});
+  assert.equal(elements['delete-dialog'].open,true);
+  assert.match(elements['delete-details'].children.map(child=>child.textContent).join(' '), /11_0/);
+  assert.equal(elements['delete-confirm'].disabled,true);
+  await elements['delete-confirm'].events.click();
+  assert.equal(requests.length,3);
+  elements['delete-manual-check'].checked=true;
+  elements['delete-manual-check'].events.change();
+  await elements['delete-confirm'].events.click();
+  assert.equal(requests[3].path,'/api/posts/delete/execute');
+  assert.deepEqual(JSON.parse(requests[3].options.body),{confirmation_id:'random-single-use',manual_target_confirmed:true});
+  assert.equal(elements['content-list'].children.length,1);
+  assert.match(elements['selected-count'].textContent,/Terpilih 0/);
+  assert.equal(elements['delete-dialog'].open,false);
+});
+
+test('cancel sends no DELETE execution and Reel remains unsupported', async () => {
+  const data=onePostAudit();
+  const {elements,requests}=setup([connected,data,preparedPost]);
+  await tick();
+  await elements['load-posts'].events.click();
+  choose(elements);
+  await elements['delete-one'].events.click();
+  elements['delete-cancel'].events.click();
+  elements['delete-manual-check'].checked=true;
+  await elements['delete-confirm'].events.click();
+  assert.equal(requests.length,3);
+  assert.equal(elements['delete-dialog'].open,false);
+  const reelData=onePostAudit();
+  reelData.items[0].kind='Reel';
+  const second=setup([connected,reelData]);
+  await tick();
+  await second.elements['load-posts'].events.click();
+  choose(second.elements);
+  assert.equal(second.elements['delete-one'].disabled,true);
+});
+
+test('unrecognized Post type cannot enable single delete and expired dialog cannot execute', async () => {
+  const data=onePostAudit();
+  delete data.items[0].post_status_type;
+  const unknown=setup([connected,data]);
+  await tick();
+  await unknown.elements['load-posts'].events.click();
+  choose(unknown.elements);
+  assert.equal(unknown.elements['delete-one'].disabled,true);
+  await unknown.elements['delete-one'].events.click();
+  assert.equal(unknown.requests.length,2);
+  const {elements,requests,timers}=setup([connected,onePostAudit(),preparedPost]);
+  await tick();
+  await elements['load-posts'].events.click();
+  choose(elements);
+  await elements['delete-one'].events.click();
+  const expiry=timers.find(timer=>timer.delay===60000);
+  expiry.fn();
+  elements['delete-manual-check'].checked=true;
+  await elements['delete-confirm'].events.click();
+  assert.equal(requests.length,3);
+  assert.equal(elements['delete-dialog'].open,false);
+  assert.match(elements['delete-status'].textContent,/kedaluwarsa/);
+});
+
+test('uncertain retains audit and never repeats DELETE after network loss', async () => {
+  const {elements,requests}=setup([connected,onePostAudit(),preparedPost,()=>{throw new Error('lost');}]);
+  await tick();
+  await elements['load-posts'].events.click();
+  choose(elements);
+  await elements['delete-one'].events.click();
+  elements['delete-manual-check'].checked=true;
+  elements['delete-manual-check'].events.change();
+  await elements['delete-confirm'].events.click();
+  await elements['delete-confirm'].events.click();
+  assert.equal(requests.length,4);
+  assert.equal(elements['content-list'].children.length,1);
+  assert.match(elements['delete-status'].textContent,/belum dapat dipastikan/);
+});
+
+test('double confirmation suppressed and late delete result ignored after Page switch', async () => {
+  let release;
+  const {elements,requests}=setup([connected,onePostAudit(),preparedPost,()=>new Promise(resolve=>{
+    release=()=>resolve({ok:true,json:async()=>({outcome:'succeeded',target:preparedPost.target,message:'Post dihapus'})});
+  })]);
+  await tick();
+  await elements['load-posts'].events.click();
+  choose(elements);
+  await elements['delete-one'].events.click();
+  elements['delete-manual-check'].checked=true;
+  elements['delete-manual-check'].events.change();
+  const first=elements['delete-confirm'].events.click();
+  await elements['delete-confirm'].events.click();
+  assert.equal(requests.length,4);
+  elements.fanpage.value='22';
+  elements.fanpage.events.change();
+  release();
+  await first;
+  assert.equal(elements['content-list'].children.length,0);
+  assert.doesNotMatch(elements['delete-status'].textContent,/Post dihapus/);
+});
+
+test('disconnect suppresses late delete success and never rebuilds cleared audit', async () => {
+  let release;
+  const {elements,requests}=setup([connected,onePostAudit(),preparedPost,()=>new Promise(resolve=>{
+    release=()=>resolve({ok:true,json:async()=>({outcome:'succeeded',target:preparedPost.target,message:'Post dihapus'})});
+  }),disconnected]);
+  await tick();
+  await elements['load-posts'].events.click();
+  choose(elements);
+  await elements['delete-one'].events.click();
+  elements['delete-manual-check'].checked=true;
+  const first=elements['delete-confirm'].events.click();
+  await elements.disconnect.events.click();
+  release();
+  await first;
+  assert.equal(requests.length,5);
+  assert.equal(elements['content-list'].children.length,0);
+  assert.equal(elements['delete-one'].disabled,true);
+  assert.doesNotMatch(elements['delete-status'].textContent,/Post dihapus/);
+});
 
 test('bootstrap enables connect but keeps empty Fanpage disabled', async () => {
   const {elements, requests} = setup([disconnected]);

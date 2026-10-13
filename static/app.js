@@ -19,6 +19,18 @@
   const dryStatus = document.getElementById("dry-status");
   const dryResults = document.getElementById("dry-results");
   const dryPagination = document.getElementById("dry-pagination");
+  const deleteButton = document.getElementById("delete-one");
+  const deleteDialog = document.getElementById("delete-dialog");
+  const deleteDetails = document.getElementById("delete-details");
+  const deleteManual = document.getElementById("delete-manual-check");
+  const deleteCancel = document.getElementById("delete-cancel");
+  const deleteConfirm = document.getElementById("delete-confirm");
+  const deleteStatus = document.getElementById("delete-status");
+  let deletion = null;
+  let deletePreparing = false;
+  let deleteExecuting = false;
+  let deleteGeneration = 0;
+  let deleteTimer = null;
   let lastDryId = null;
   let dryOffset = 0;
   let dryLoading = false;
@@ -60,14 +72,19 @@
   }
 
   function controls() {
-    connectButton.disabled = !ready || busy || postsLoading || dryLoading || Date.now() < cooldownUntil;
+    const deleting = deletePreparing || deleteExecuting || Boolean(deletion);
+    connectButton.disabled = !ready || busy || postsLoading || dryLoading || deleting || Date.now() < cooldownUntil;
     disconnectButton.disabled = !ready || busy || !connected;
     tokenInput.disabled = busy;
     fanpageSelect.disabled = busy || !hasPages;
     connectButton.textContent = busy ? "Sedang memproses…" : "Hubungkan";
     status.setAttribute("aria-busy", String(busy));
-    loadButton.disabled = !ready || busy || postsLoading || dryLoading || starting || stopping || !connected || !fanpageSelect.value || Date.now() < cooldownUntil;
-    dryButton.disabled = !ready || busy || postsLoading || dryLoading || !connected || selected.size === 0;
+    loadButton.disabled = !ready || busy || postsLoading || dryLoading || deleting || starting || stopping || !connected || !fanpageSelect.value || Date.now() < cooldownUntil;
+    dryButton.disabled = !ready || busy || postsLoading || dryLoading || deleting || !connected || selected.size === 0;
+    deleteButton.disabled = !ready || busy || postsLoading || dryLoading || deleting || !connected || Date.now() < cooldownUntil || !onePost();
+    deleteConfirm.disabled = !deletion || !deleteManual.checked || deleteExecuting || Date.now() < cooldownUntil;
+    deleteCancel.disabled = deleteExecuting;
+    deleteManual.disabled = deleteExecuting;
     stopButton.disabled = (!postsLoading && !dryLoading) || stopping;
     stopButton.textContent = dryLoading ? "Berhenti dry run" : postsLoading ? "Berhenti memuat" : "Berhenti";
     maxPosts.disabled = postsLoading || busy;
@@ -164,6 +181,8 @@
   }
 
   function clearAudit() {
+    closeDelete();
+    deleteStatus.textContent = "Hapus satu Post biasa memerlukan pemeriksaan manual dan konfirmasi; bulk tetap nonaktif.";
     cancelDry();
     dryResults.replaceChildren();
     dryPagination.replaceChildren();
@@ -318,6 +337,7 @@
   }
 
   function updateSelected() {
+    if (deletion && (selected.size !== 1 || !selected.has(deletion.target.key))) closeDelete();
     const selectable = loadedAudit?.items.filter(item => item.selectable) || [];
     selectedCount.textContent = `Terpilih ${selected.size} dari ${selectable.length} konten yang dapat diaudit.`;
     selectAll.disabled = !loadedAudit?.bulk_selectable || selectable.length === 0;
@@ -437,6 +457,119 @@
     selected.clear();
     if (selectAll.checked) for (const item of loadedAudit.items) if (item.selectable) selected.add(item.key);
     renderAuditPage();
+  });
+
+  function onePost() {
+    if (selected.size !== 1) return null;
+    const item = loadedAudit?.items.find(item => selected.has(item.key));
+    if (!item?.selectable || item.kind !== "Postingan" || item.post_status_type !== "mobile_status_update" || item.identified_story === true || !safeAuditURL(item.permalink)) return null;
+    if (!Array.isArray(item.sources) || item.sources.length === 0 || item.sources.some(source => source.source !== "published_posts")) return null;
+    if (new Set(item.sources.map(source => source.object_id)).size !== 1 || item.sources[0].object_id !== item.object_id) return null;
+    return item;
+  }
+
+  function closeDelete() {
+    deleteGeneration += 1;
+    clearTimeout(deleteTimer);
+    deletion = null;
+    deletePreparing = false;
+    // An already-sent request is not retried; generation protects new Page/session UI.
+    deleteDialog.close();
+    deleteManual.checked = false;
+    deleteDetails.replaceChildren();
+  }
+
+  deleteButton.addEventListener("click", async () => {
+    const item = onePost();
+    if (!ready || !connected || busy || postsLoading || dryLoading || deletePreparing || deleteExecuting || deletion || Date.now() < cooldownUntil || !item) return;
+    const pageId = fanpageSelect.value;
+    const generation = ++deleteGeneration;
+    deletePreparing = true;
+    controls();
+    deleteStatus.textContent = "Menyiapkan konfirmasi satu Post dari metadata audit lokal; belum mengirim DELETE.";
+    try {
+      const data = await api("/api/posts/delete/prepare", {method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({page_id:pageId, keys:[item.key]})});
+      if (generation !== deleteGeneration || !connected || pageId !== fanpageSelect.value || onePost()?.key !== item.key) return;
+      if (data.target?.page_id !== pageId || data.target?.key !== item.key || !safeAuditURL(data.target.permalink)) throw new Error("Snapshot konfirmasi tidak sesuai target pilihan.");
+      deletion = data;
+      deleteManual.checked = false;
+      deleteDetails.replaceChildren();
+      for (const text of [`Fanpage: ${data.target.page_name}`, `Jenis: ${data.target.kind}`, `ID Post asli: ${data.target.target_id}`,
+        `Tanggal: ${data.target.published_wib}`, `Teks: ${data.target.text || "Tanpa teks."}`, `Konfirmasi berlaku ${data.expires_in_seconds} detik.`]) {
+        const line = document.createElement("p");
+        line.textContent = text;
+        deleteDetails.appendChild(line);
+      }
+      const link = document.createElement("a");
+      link.textContent = "Buka Post di Facebook untuk pemeriksaan manual";
+      link.href = safeAuditURL(data.target.permalink);
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      deleteDetails.appendChild(link);
+      deleteDialog.showModal();
+      deleteStatus.textContent = "Menunggu pemeriksaan manual dan Konfirmasi Hapus. Belum ada DELETE dikirim.";
+      deleteTimer = setTimeout(() => {
+        if (generation !== deleteGeneration || deleteExecuting) return;
+        closeDelete();
+        deleteStatus.textContent = "Konfirmasi kedaluwarsa. Periksa target lagi sebelum menyiapkan konfirmasi baru.";
+        controls();
+      }, Math.max(0, data.expires_in_seconds) * 1000);
+    } catch (error) {
+      if (generation === deleteGeneration) deleteStatus.textContent = error.message;
+    } finally {
+      if (generation === deleteGeneration) deletePreparing = false;
+      controls();
+    }
+  });
+
+  deleteManual.addEventListener("change", controls);
+  deleteCancel.addEventListener("click", () => {
+    if (deleteExecuting) return;
+    closeDelete();
+    deleteStatus.textContent = "Konfirmasi dibatalkan; tidak ada DELETE dikirim.";
+    controls();
+  });
+  deleteDialog.addEventListener("cancel", event => {
+    event.preventDefault();
+    if (!deleteExecuting) { closeDelete(); controls(); }
+  });
+  deleteConfirm.addEventListener("click", async () => {
+    if (!deletion || deleteExecuting || !deleteManual.checked || !connected || Date.now() < cooldownUntil || onePost()?.key !== deletion.target.key) return;
+    const snapshot = deletion;
+    const generation = deleteGeneration;
+    const pageId = fanpageSelect.value;
+    deleteExecuting = true;
+    clearTimeout(deleteTimer);
+    controls();
+    deleteStatus.textContent = "Mengirim satu percobaan penghapusan Post. Tidak ada retry otomatis.";
+    const current = () => generation === deleteGeneration && connected && pageId === fanpageSelect.value;
+    try {
+      // Never use jobMutation (which retries). Execution receives only confirmation ID.
+      const result = await api("/api/posts/delete/execute", {method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({confirmation_id:snapshot.confirmation_id, manual_target_confirmed:true})});
+      if (!current()) return;
+      applyCooldown(result);
+      deleteStatus.textContent = result.message;
+      if (result.outcome === "succeeded" && result.target?.key === snapshot.target.key && result.target?.target_id === snapshot.target.target_id) {
+        loadedAudit.items = loadedAudit.items.filter(item => item.key !== snapshot.target.key);
+        loadedAudit.displayed = loadedAudit.items.length;
+        loadedAudit.found = Math.max(loadedAudit.displayed, loadedAudit.found - 1);
+        loadedAudit.dated_count = loadedAudit.items.filter(item => item.published_at).length;
+        loadedAudit.undated_count = loadedAudit.displayed - loadedAudit.dated_count;
+        selected.delete(snapshot.target.key);
+        displayPage = Math.min(displayPage, Math.max(0, Math.ceil(loadedAudit.items.length / DISPLAY_SIZE)-1));
+        loadStatus.textContent = `Ditampilkan ${loadedAudit.displayed} konten setelah satu Post berhasil dihapus.`;
+        renderAuditPage();
+      }
+    } catch (error) {
+      if (!current()) return;
+      deleteStatus.textContent = error.code ? error.message : "Hasil penghapusan belum dapat dipastikan karena respons backend tidak diterima. Post tetap ditampilkan; periksa Facebook manual. Tidak ada retry otomatis.";
+    } finally {
+      deleteExecuting = false;
+      if (current()) closeDelete();
+      controls();
+    }
   });
   fanpageSelect.addEventListener("change", () => {
     if (activePageId !== fanpageSelect.value) {
