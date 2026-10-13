@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from config import Settings
 from errors import AppError
+from content_cache import AuditCache
 
 
 @dataclass
@@ -45,6 +46,9 @@ class Browser:
     busy: bool = False
     session_id: str | None = field(default=None, repr=False)
     reserved_slot: bool = False
+    load_active: bool = False
+    load_task: object = field(default=None, repr=False)
+    load_session_id: str | None = field(default=None, repr=False)
 
 
 class MemoryStore:
@@ -58,13 +62,15 @@ class MemoryStore:
         self.active_jobs = 0
         self.reserved_slots = 0
         self._salt = secrets.token_bytes(32)
+        self.audits = AuditCache(settings)
 
     def cleanup(self):
         now = time.monotonic()
         for key in [key for key, session in self.sessions.items() if session.expires_at <= now]:
             del self.sessions[key]
+        self.audits.cleanup(self.sessions)
         for key, browser in list(self.browsers.items()):
-            if browser.expires_at <= now and not browser.busy:
+            if browser.expires_at <= now and not browser.busy and not browser.load_active:
                 self.sessions.pop(browser.session_id, None)
                 del self.browsers[key]
             else:
@@ -127,6 +133,8 @@ class MemoryStore:
             raise AppError("browser_required", 409)
         if browser.busy:
             raise AppError("connection_busy", 409)
+        if browser.load_active:
+            raise AppError("load_busy", 409)
         self.check_cooldown(token_key)
         now = time.monotonic()
         for attempts, maximum in [(browser.attempts, self.settings.local_attempts),
@@ -163,6 +171,7 @@ class MemoryStore:
 
     def replace(self, browser_id: str, user_token: str, pages: list[Page]):
         browser = self.browsers[browser_id]
+        self.audits.discard(browser.session_id)
         self.sessions.pop(browser.session_id, None)
         session_id = secrets.token_urlsafe(32)
         session = Session(browser_id, user_token, pages, time.monotonic() + self.settings.session_ttl)
@@ -176,11 +185,61 @@ class MemoryStore:
         if browser and browser.busy:
             raise AppError("connection_busy", 409)
         if self.session(browser_id, session_id) is not None:
+            if browser.load_task is not None:
+                browser.load_task.cancel()
+            self.audits.discard(session_id)
             del self.sessions[session_id]
             browser.session_id = None
 
+    def require_page(self, browser_id, session_id, page_id):
+        session = self.session(browser_id, session_id)
+        if session is None:
+            raise AppError("session_expired", 401)
+        page = next((page for page in session.pages if page.id == page_id), None)
+        if page is None:
+            raise AppError("page_not_owned", 403)
+        return session, page
+
+    def begin_load(self, browser_id, session_id, token_key, limit):
+        browser = self.browser(browser_id)
+        if browser is None:
+            raise AppError("session_expired", 401)
+        if browser.busy:
+            raise AppError("connection_busy", 409)
+        if browser.load_active:
+            raise AppError("load_busy", 409)
+        self.check_cooldown(token_key)
+        now = time.monotonic()
+        for attempts, maximum in [(browser.attempts, self.settings.local_attempts),
+                                  (self.global_attempt_times, self.settings.global_attempts)]:
+            if len(attempts) >= maximum:
+                wait = math.ceil(attempts[0] + self.settings.local_window - now)
+                raise AppError("local_rate_limit", 429, max(1, wait))
+        if self.active_jobs >= self.settings.max_jobs:
+            raise AppError("job_capacity", 503)
+        self.audits.reserve(session_id, limit)
+        browser.attempts.append(now)
+        self.global_attempt_times.append(now)
+        browser.load_active = True
+        browser.load_session_id = session_id
+        self.active_jobs += 1
+        return browser
+
+    def finish_load(self, browser_id, session_id):
+        browser = self.browsers.get(browser_id)
+        if browser and browser.load_active and browser.load_session_id == session_id:
+            browser.load_active = False
+            browser.load_task = None
+            browser.load_session_id = None
+            self.active_jobs -= 1
+        self.audits.release(session_id)
+
     def clear(self):
+        for browser in self.browsers.values():
+            if browser.load_task is not None:
+                browser.load_task.cancel()
         self.sessions.clear()
         self.browsers.clear()
         self.token_cooldowns.clear()
         self.global_attempt_times.clear()
+        self.audits.clear()

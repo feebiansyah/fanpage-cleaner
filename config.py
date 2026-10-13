@@ -37,6 +37,13 @@ class Settings:
     max_retry_wait: float = 5
     cooldown_seconds: float = 60
     usage_threshold: float = 90
+    posts_timeout: float = 60
+    posts_max_pages: int = 50
+    story_max_items: int = 5000
+    audit_ttl: int = 300
+    max_audit_entries: int = 20
+    max_audit_items: int = 20000
+    max_audit_bytes: int = 67108864
 
     def __post_init__(self):
         if not re.fullmatch(r"v[1-9][0-9]?\.0", self.graph_version):

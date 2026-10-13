@@ -16,7 +16,16 @@ header p { margin: 0; color: #526176; }
 .card { padding: 24px; margin-top: 18px; border: 1px solid #dce3ed; border-radius: 12px; background: #fff; }
 label { display: block; margin-bottom: 8px; font-weight: 600; }
 .input-row { display: flex; align-items: stretch; gap: 12px; }
-input[type="password"], select { width: 100%; min-width: 0; padding: 11px 12px; border: 1px solid #bac6d6; border-radius: 7px; background: #fff; font: inherit; color: inherit; }
+input[type="password"], input[type="number"], select { width: 100%; min-width: 0; padding: 11px 12px; border: 1px solid #bac6d6; border-radius: 7px; background: #fff; font: inherit; color: inherit; }
+input[type="number"] { max-width: 200px; }
+.limit-label { margin-top: 18px; }
+.audit-row { display: grid; grid-template-columns: 28px 22px 1fr 2fr; gap: 10px; padding: 18px 4px; border-bottom: 1px solid #dce3ed; text-align: left; overflow-wrap: anywhere; }
+.audit-row p, .audit-row a { grid-column: 3 / -1; white-space: pre-wrap; }
+.audit-row img { grid-column: 3; width: 100px; height: 80px; object-fit: cover; border-radius: 6px; }
+.audit-row time { font-size: .85rem; color: #526176; }
+.audit-row:last-child { border-bottom: none; }
+.local-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+.date-unknown-heading { text-align: left; font-size: 1rem; }
 button { padding: 11px 18px; border: 1px solid #2551a0; border-radius: 7px; background: #2551a0; color: white; font: inherit; font-weight: 600; white-space: nowrap; }
 button.danger { background: #973c3c; border-color: #973c3c; }
 button.secondary { background: #edf1f6; color: #33445b; border-color: #bac6d6; }

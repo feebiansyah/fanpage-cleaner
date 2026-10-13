@@ -1,6 +1,15 @@
 """Error tetap: tidak pernah menyertakan input, exception, atau pesan Meta."""
 
 MESSAGES = {
+    "invalid_limit": "Maksimal postingan harus bilangan bulat antara 1 dan 5000.",
+    "invalid_page": "Page ID harus berupa teks ID Fanpage yang valid.",
+    "invalid_load_body": "Body Load Posts harus JSON dengan page_id dan limit saja.",
+    "page_not_owned": "Fanpage tidak tersedia pada sesi browser ini.",
+    "page_token_missing": "Fanpage ini tidak memiliki page access token. Hubungkan kembali dengan izin yang sesuai.",
+    "session_expired": "Sesi tidak tersedia atau sudah kedaluwarsa. Hubungkan kembali; hasil tidak disimpan.",
+    "load_busy": "Satu pekerjaan Load Posts masih berjalan pada browser ini.",
+    "load_cancelled": "Load Posts dibatalkan karena koneksi diputus. Hasil tidak disimpan.",
+    "audit_capacity": "Kapasitas hasil audit dalam memori penuh. Kurangi maksimal postingan atau tunggu hasil kedaluwarsa.",
     "token_empty": "Token Facebook kosong. Masukkan user access token.",
     "token_invalid": "Token Facebook tidak valid atau sudah kedaluwarsa.",
     "permission_denied": "Akses atau izin Facebook ditolak. Periksa izin aplikasi dan akses Fanpage.",

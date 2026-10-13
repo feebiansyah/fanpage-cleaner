@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from config import Settings
 from errors import AppError
 from graph_api import GraphClient
 from sessions import MemoryStore
+from content import ContentLoader
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -39,10 +41,11 @@ def session_payload(session, state="disconnected"):
         message = "Sesi kedaluwarsa. Hubungkan kembali dengan user access token." if state == "expired" else "Belum terhubung ke Facebook."
         return {"connected": False, "state": state, "pages": [], "count": 0, "message": message}
     pages = session.metadata()
-    message = ("Fanpage berhasil dimuat. Load Posts belum tersedia pada tahap ini." if pages else
+    message = ("Fanpage berhasil dimuat. Pilih Fanpage dan gunakan Load Posts untuk audit." if pages else
                "Tidak ada Fanpage yang dikembalikan oleh Facebook. Periksa akses Fanpage dan izin token.")
     return {"connected": True, "state": "connected" if pages else "empty",
-            "pages": pages, "count": len(pages), "message": message}
+            "pages": pages, "count": len(pages), "message": message,
+            "session_remaining_seconds": max(0, int(session.expires_at - time.monotonic()))}
 
 
 def check_origin(request: Request, settings: Settings, mutation=False):
@@ -57,7 +60,7 @@ def check_origin(request: Request, settings: Settings, mutation=False):
         raise AppError("origin_denied", 403)
 
 
-async def read_token(request: Request, settings: Settings):
+async def read_json(request: Request, settings: Settings):
     length = request.headers.get("content-length")
     if length is not None:
         try:
@@ -77,6 +80,11 @@ async def read_token(request: Request, settings: Settings):
         payload = json.loads(body)
     except (ValueError, UnicodeError, RecursionError):
         raise AppError("bad_request") from None
+    return payload
+
+
+async def read_token(request: Request, settings: Settings):
+    payload = await read_json(request, settings)
     if not isinstance(payload, dict) or set(payload) != {"token"}:
         raise AppError("bad_request")
     token = payload["token"]
@@ -134,7 +142,7 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
             response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' https://fbcdn.net https://*.fbcdn.net https://fbsbx.com https://*.fbsbx.com; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
         return response
 
     @application.exception_handler(AppError)
@@ -208,6 +216,65 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         response = JSONResponse(session_payload(None))
         delete_session_cookie(response, settings)
         return response
+
+    def validate_page_id(page_id):
+        if not isinstance(page_id, str) or not re.fullmatch(r"[0-9]{1,40}", page_id):
+            raise AppError("invalid_page")
+
+    @application.post("/api/posts/load")
+    async def load_posts(request: Request):
+        current = application.state.settings
+        check_origin(request, current, mutation=True)
+        try:
+            payload = await asyncio.wait_for(read_json(request, current), current.connect_timeout)
+        except asyncio.TimeoutError:
+            raise AppError("timeout", 504) from None
+        except AppError as error:
+            if error.code == "bad_request":
+                raise AppError("invalid_load_body") from None
+            raise
+        if not isinstance(payload, dict) or set(payload) != {"page_id", "limit"}:
+            raise AppError("invalid_load_body")
+        page_id, limit = payload["page_id"], payload["limit"]
+        validate_page_id(page_id)
+        if type(limit) is not int or not 1 <= limit <= 5000:
+            raise AppError("invalid_limit")
+        browser_id, session_id = request.cookies.get(BROWSER_COOKIE), request.cookies.get(SESSION_COOKIE)
+        store = application.state.store
+        session, page = store.require_page(browser_id, session_id, page_id)
+        if not page.access_token:
+            raise AppError("page_token_missing", 403)
+        browser = store.begin_load(browser_id, session_id, store.token_key(page.access_token), limit)
+        deadline = min(session.expires_at, time.monotonic() + current.posts_timeout)
+        loader = ContentLoader(application.state.graph, store, current)
+        try:
+            browser.load_task = asyncio.create_task(loader.load(browser_id, session_id, page, limit, deadline))
+            result = await browser.load_task
+            store.require_page(browser_id, session_id, page_id)
+            store.audits.put(session_id, result, session.expires_at)
+            return JSONResponse(store.audits.get(session_id, page_id))
+        except asyncio.CancelledError:
+            if session.expires_at <= time.monotonic():
+                raise AppError("session_expired", 401) from None
+            if store.session(browser_id, session_id) is None:
+                raise AppError("load_cancelled", 409) from None
+            raise
+        except AppError:
+            raise
+        except Exception:
+            raise AppError("internal_error", 500) from None
+        finally:
+            store.finish_load(browser_id, session_id)
+
+    @application.get("/api/posts")
+    async def cached_posts(request: Request, page_id: str):
+        check_origin(request, application.state.settings)
+        validate_page_id(page_id)
+        browser_id, session_id = request.cookies.get(BROWSER_COOKIE), request.cookies.get(SESSION_COOKIE)
+        store = application.state.store
+        store.require_page(browser_id, session_id, page_id)
+        cached = store.audits.get(session_id, page_id)
+        return cached or {"page_id": page_id, "state": "not_loaded", "items": [], "displayed": 0}
 
     return application
 

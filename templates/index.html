@@ -34,23 +34,28 @@
         <select id="fanpage" disabled aria-describedby="availability">
           <option value="">Belum ada Fanpage yang terhubung</option>
         </select>
-        <button type="button" disabled aria-describedby="posts-help">Load Posts</button>
+        <button id="load-posts" type="button" disabled aria-describedby="posts-help">Load Posts</button>
       </div>
-      <p class="help" id="posts-help">Load Posts dan penghapusan belum tersedia pada tahap ini. Fanpage yang muncul tidak membuktikan izin menghapus.</p>
+      <label for="max-posts" class="limit-label">Maksimal postingan</label>
+      <input id="max-posts" type="number" value="100" min="1" max="5000" step="1" inputmode="numeric" aria-describedby="posts-help">
+      <p class="help" id="posts-help">Maksimal konten unik yang ditampilkan setelah deduplikasi dan pengecualian Story yang teridentifikasi. Tidak ada mode mengambil semua. Penghapusan belum tersedia.</p>
     </section>
 
     <section class="card" aria-labelledby="content-title">
       <div class="section-heading">
         <h2 id="content-title">Daftar konten</h2>
         <label class="checkbox-label" for="select-all">
-          <input id="select-all" type="checkbox" disabled aria-describedby="availability">
+          <input id="select-all" type="checkbox" disabled aria-describedby="audit-warning">
           Pilih Semua
         </label>
       </div>
-      <div class="content-list" aria-label="Daftar konten Fanpage">
+      <p id="load-status" class="help" role="status" aria-live="polite">Belum ada konten yang dimuat.</p>
+      <p id="audit-warning" class="notice">Audit memakai kandidat yang dapat dibaca lewat API. Belum menjamin N terbaru seluruh Fanpage atau hasil aman dihapus. Urutan publikasi dapat berbeda dari tab Postingan Facebook karena pin atau susunan khusus.</p>
+      <p id="selected-count" class="help" role="status" aria-live="polite">Terpilih 0 konten.</p>
+      <div id="content-list" class="content-list" aria-label="Daftar konten Fanpage">
         <p>Belum ada konten yang dimuat.</p>
-        <p class="help">Pengambilan konten belum tersedia pada tahap ini.</p>
       </div>
+      <nav id="local-pagination" class="local-pagination" aria-label="Halaman daftar audit lokal"></nav>
       <div class="actions">
         <button class="danger" type="button" disabled aria-describedby="availability">Hapus Terpilih</button>
         <button class="secondary" type="button" disabled aria-describedby="availability">Berhenti</button>
@@ -59,10 +64,10 @@
 
     <section class="card" aria-labelledby="progress-title">
       <div class="section-heading">
-        <h2 id="progress-title">Progres</h2>
-        <span>0%</span>
+      <h2 id="progress-title">Status operasi</h2>
+        <span>Audit lokal</span>
       </div>
-      <progress value="0" max="100" aria-label="Progres operasi">0%</progress>
+      <progress id="load-progress" value="0" max="100" aria-label="Proses pengambilan konten">Belum berjalan</progress>
       <p class="help" id="operation-status" role="status" aria-live="polite">Belum ada operasi konten yang berjalan.</p>
     </section>
   </main>

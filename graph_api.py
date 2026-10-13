@@ -1,4 +1,4 @@
-"""GET /me/accounts only. Never follow upstream URLs or expose Meta messages."""
+"""Shared bounded GET transport. Never follow upstream URLs or expose Meta messages."""
 
 import asyncio
 import hashlib
@@ -104,15 +104,17 @@ class GraphClient:
         name = "".join(character for character in name if character.isprintable())
         return Page(page_id, name, token)
 
-    def _next_cursor(self, paging):
+    def _next_cursor(self, paging, page_id=None, edge=None):
         link = paging["next"]
         if not isinstance(link, str) or len(link) > 32768:
             raise AppError("pagination_incomplete", 502)
         try:
             parsed = urlsplit(link)
+            path_pattern = ("/" + re.escape(self.settings.graph_version) + r"/(me|[0-9]{1,40})/accounts/?" if page_id is None else
+                            "/" + re.escape(self.settings.graph_version) + "/" + re.escape(page_id) + "/" + re.escape(edge) + "/?")
             if (parsed.scheme != "https" or parsed.hostname != "graph.facebook.com"
                     or parsed.port not in {None, 443} or parsed.username or parsed.password or parsed.fragment
-                    or not re.fullmatch("/" + re.escape(self.settings.graph_version) + r"/(me|[0-9]{1,40})/accounts/?", parsed.path)):
+                    or not re.fullmatch(path_pattern, parsed.path)):
                 raise ValueError()
             query = parse_qs(parsed.query, max_num_fields=20)
             cursors = paging.get("cursors", {})
@@ -158,6 +160,24 @@ class GraphClient:
         if cursor is not None:
             params["after"] = cursor
         endpoint = "https://graph.facebook.com/" + self.settings.graph_version + "/me/accounts"
+        return await self._get(token, token_key, endpoint, params, deadline)
+
+    async def content_page(self, page_id, edge, fields, token, token_key, limit, cursor, deadline, extra=None):
+        if edge not in {"published_posts", "video_reels", "stories"} or not re.fullmatch(r"[0-9]{1,40}", page_id):
+            raise AppError("invalid_page")
+        endpoint = "https://graph.facebook.com/" + self.settings.graph_version + "/" + page_id + "/" + edge
+        params = {"fields": fields, "limit": str(limit), **(extra or {})}
+        if cursor is not None:
+            params["after"] = cursor
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AppError("timeout", 504)
+        try:
+            return await asyncio.wait_for(self._get(token, token_key, endpoint, params, deadline), remaining)
+        except asyncio.TimeoutError:
+            raise AppError("timeout", 504) from None
+
+    async def _get(self, token, token_key, endpoint, params, deadline):
         for attempt in range(3):  # One initial attempt, at most two retries.
             self.store.check_cooldown(token_key)
             if time.monotonic() >= deadline:
