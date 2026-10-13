@@ -19,13 +19,17 @@ class DryJob:
     targets: list
     duplicates: int
     pages: dict
+    mode: str = 'dry_run'
+    stop_requested: bool = False
+    stop_reason: str = ''
+    final_stop_state: str = 'cancelled'
     state: str = 'queued'
     events: deque = field(default_factory=deque)
     active: dict = field(default_factory=dict,repr=False)
 
     @property
     def terminal(self):
-        return self.state in {'completed','cancelled','failed','paused_needs_reconnect'}
+        return self.state in {'completed','cancelled','failed','paused_needs_reconnect'} and (self.mode!='delete_page_posts' or not self.active)
 
 
 class BulkQueue:
@@ -39,10 +43,13 @@ class BulkQueue:
         self.changed=asyncio.Event()
         self.stopping=False
         self.recovered_count=0
+        self.blocked_pages={}
+        self.blocked_scopes={}
+        self.success_reservations=set()
 
     def record(self,job):
         return {'version':1,'job_id':job.id,'owner_id':job.owner_id,'created_at':job.created_at,
-                'state':job.state,'mode':'dry_run','targets':[t.public() for t in job.targets]}
+                'state':job.state,'mode':job.mode,'targets':[t.public() for t in job.targets]}
 
     def persist(self,job,index=None):
         try:
@@ -50,9 +57,20 @@ class BulkQueue:
             else:
                 first=(index//256)*256
                 record={'version':1,'job_id':job.id,'owner_id':job.owner_id,'created_at':job.created_at,
-                        'state':job.state,'mode':'dry_run','targets':[t.public() for t in job.targets[first:first+256]]}
+                        'state':job.state,'mode':job.mode,'targets':[t.public() for t in job.targets[first:first+256]]}
                 self.checkpoints.write_progress(record,index//256)
         except (ValueError,OSError,TypeError):
+            if job.mode=='delete_page_posts':
+                job.state='failed'
+                job.stop_requested=True
+                job.stop_reason='checkpoint_failed'
+                self._remove_pending(job.id)
+                for target in job.targets:
+                    if target.status=='queued' or (target.status=='processing' and not target.diagnostic.get('request_started')):
+                        target.status='blocked'
+                        if 'checkpoint_failed' not in target.reasons: target.reasons.append('checkpoint_failed')
+                self._cancel_unsent(job)
+                raise AppError('checkpoint_failed',503) from None
             job.state='failed'
             for target in job.targets:
                 if target.status=='processing':
@@ -63,8 +81,10 @@ class BulkQueue:
 
     def sync_sessions(self):
         now=time.monotonic()
+        self.blocked_pages={k:v for k,v in self.blocked_pages.items() if v>now}
+        self.blocked_scopes={k:v for k,v in self.blocked_scopes.items() if v>now}
         for job in list(self.jobs.values()):
-            if not job.terminal and (job.session_id not in self.store.sessions or job.expires_at<=now):
+            if not job.terminal and not job.stop_requested and (job.session_id not in self.store.sessions or job.expires_at<=now):
                 self.pause(job,'session_expired' if job.session_id not in self.store.sessions else 'queue_duration_limit')
             if job.terminal and job.expires_at<=now and not job.active:
                 self._remove_pending(job.id)
@@ -80,6 +100,9 @@ class BulkQueue:
         self.owners.pop(sid,None)
 
     def pause(self,job,reason):
+        if job.mode=='delete_page_posts':
+            self.stop_real(job,reason,'paused_needs_reconnect')
+            return
         job.state='paused_needs_reconnect'
         for target in job.targets:
             if target.status=='processing':
@@ -92,17 +115,19 @@ class BulkQueue:
         except AppError: pass
         self.changed.set()
 
-    def add(self,browser_id,sid,targets,duplicates,pages):
+    def add(self,browser_id,sid,targets,duplicates,pages,mode='dry_run'):
         self.sync_sessions()
         if self.store.session(browser_id,sid) is None:
             raise AppError('session_expired',401)
         if self.stopping or not targets:
             raise AppError('invalid_selection')
         total=sum(len(j.targets) for j in self.jobs.values())+len(targets)
-        if len(self.jobs)>=self.settings.dry_max_jobs or total>self.settings.dry_max_targets or total*2048>self.settings.dry_max_bytes:
+        size=sum(len(j.targets)*(4096 if j.mode=='delete_page_posts' else 2048) for j in self.jobs.values())+len(targets)*(4096 if mode=='delete_page_posts' else 2048)
+        if len(self.jobs)>=self.settings.dry_max_jobs or total>self.settings.dry_max_targets or size>self.settings.dry_max_bytes:
             raise AppError('dry_capacity',503)
         owner=self.owners.setdefault(sid,uuid.uuid4().hex)
         job=DryJob(uuid.uuid4().hex,owner,browser_id,sid,time.time(),time.monotonic()+self.settings.dry_job_ttl,targets,duplicates,pages)
+        job.mode=mode
         self.persist(job)  # No job admitted/dispatched if atomic checkpoint failed.
         self.jobs[job.id]=job
         for index,target in enumerate(targets):
@@ -135,27 +160,57 @@ class BulkQueue:
         for _ in range(len(self.rotation)):
             page=self.rotation.popleft()
             items=self.buckets.get(page)
-            if not items: continue
+            if not items:
+                self.buckets.pop(page,None)
+                continue
             self.rotation.append(page)
             for _ in range(len(items)):
                 job_id,index=items.popleft()
                 job=self.jobs[job_id]
                 target=job.targets[index]
-                if job.terminal or target.status!='queued': continue
+                if job.terminal or job.stop_requested or target.status!='queued': continue
+                if job.mode=='delete_page_posts':
+                    reason=self.block_reason(target)
+                    if reason:
+                        target.status='blocked'
+                        target.reasons.append(reason)
+                        try: self.persist(job,index)
+                        except AppError: pass
+                        self._complete_real(job)
+                        continue
+                    try: self.store.check_cooldown(target.scope)
+                    except AppError:
+                        job.state='cooldown'
+                        items.append((job_id,index))
+                        continue
                 if target.canonical in self.locks or target.retry_at>time.monotonic():
                     items.append((job_id,index))
                     continue
+                if job.mode=='delete_page_posts':
+                    singles=sum(c.active for c in self.store.single_delete.confirmations.values()) if self.store.single_delete else 0
+                    if len(self.store.audits.removed_posts)+len(self.success_reservations)+singles>=self.settings.max_audit_items:
+                        target.status='blocked'
+                        target.reasons.append('audit_capacity')
+                        try: self.persist(job,index)
+                        except AppError: pass
+                        self._complete_real(job)
+                        continue
+                    self.success_reservations.add(target.canonical)
                 self.locks.add(target.canonical)
                 target.status='processing'
                 job.state='running'
                 try: self.persist(job,index)
                 except AppError:
                     self.locks.discard(target.canonical)
+                    self.success_reservations.discard(target.canonical)
                     continue
                 return job,target,index
         return None
 
     def release(self,job,target,index,outcome):
+        if job.mode=='delete_page_posts':
+            self.release_real(job,target,index,outcome)
+            return
         if target.status=='processing':
             if outcome.status=='failed' and outcome.temporary and target.attempts<3 and not job.terminal:
                 target.status='queued'
@@ -167,6 +222,7 @@ class BulkQueue:
             if outcome.reason not in target.reasons: target.reasons.append(outcome.reason)
             while len(target.reasons)>12: target.reasons.pop()
         self.locks.discard(target.canonical)
+        self.success_reservations.discard(target.canonical)
         job.active.pop(target.canonical,None)
         job.events.append({'status':target.status,'reason':outcome.reason})
         while len(job.events)>self.settings.dry_max_events: job.events.popleft()
@@ -179,6 +235,9 @@ class BulkQueue:
         self.changed.set()
 
     def cancel(self,job):
+        if job.mode=='delete_page_posts':
+            self.stop_real(job,'user_stopped')
+            return
         if job.terminal: return
         job.state='cancelled'
         for target in job.targets:
@@ -192,6 +251,15 @@ class BulkQueue:
         self.changed.set()
 
     def snapshot(self,job,offset=0):
+        if job.mode=='delete_page_posts':
+            counts={s:sum(t.status==s for t in job.targets) for s in ('queued','processing','succeeded','failed','uncertain','blocked','cancelled')}
+            return {'job_id':job.id,'mode':job.mode,'state':job.state,'terminal':job.terminal,
+                    'total':len(job.targets),'selected':len(job.targets)+job.duplicates,'duplicates':job.duplicates,
+                    'counts':counts,'completed':len(job.targets)-counts['queued']-counts['processing'],
+                    'succeeded':counts['succeeded'],'manual_targets_confirmed':True,'story_automatically_verified':False,
+                    'pages':[{'page_id':pid,'name':name} for pid,name in job.pages.items()],
+                    'items':[{**t.public(),'details':dict(t.details),'diagnostic':dict(t.diagnostic),'cleanup_warning':t.cleanup_warning} for t in job.targets],
+                    'stop_reason':job.stop_reason,'message':'Operasi menargetkan Page Post; hasil sukses hanya berdasarkan respons Meta yang ketat.'}
         targets=job.targets
         return {'job_id':job.id,'mode':'dry_run','state':job.state,'terminal':job.terminal,
                 'safe_for_delete':False,'selected':len(targets)+job.duplicates,'unique':len(targets),
@@ -201,3 +269,74 @@ class BulkQueue:
                 'pages':[{'page_id':pid,'name':name} for pid,name in job.pages.items()],
                 'items':[t.public() for t in targets[offset:offset+50]],'offset':offset,'total':len(targets),
                 'events':list(job.events),'message':'Dry run hanya memeriksa metadata lokal; tidak ada konten dihapus.'}
+
+    def block_reason(self,target):
+        if target.scope in self.blocked_scopes: return 'token_invalid'
+        if (target.page_id,target.scope) in self.blocked_pages: return 'permission_denied'
+        return None
+
+    def _cancel_unsent(self,job):
+        for target in job.targets:
+            task=job.active.get(target.canonical)
+            if task is not None and not target.diagnostic.get('request_started'):
+                task.cancel()
+
+    def _complete_real(self,job):
+        if all(t.status not in {'queued','processing'} for t in job.targets) and not job.active:
+            if job.state!='failed':
+                job.state=job.final_stop_state if job.stop_requested else 'completed'
+            if job.state=='paused_needs_reconnect': job.session_id=None
+
+    def stop_real(self,job,reason,final_state='cancelled'):
+        if job.terminal: return
+        job.stop_requested=True
+        job.stop_reason=reason
+        job.final_stop_state=final_state
+        job.state='stopping'
+        for target in job.targets:
+            if target.status=='queued':
+                target.status='cancelled'
+                target.reasons.append(reason)
+        self._remove_pending(job.id)
+        self._cancel_unsent(job)
+        self._complete_real(job)
+        try: self.persist(job)
+        except AppError: pass
+        self.changed.set()
+
+    def block_related(self,target,reason):
+        expiry=time.monotonic()+self.settings.dry_job_ttl
+        if reason=='token_invalid': self.blocked_scopes[target.scope]=expiry
+        else: self.blocked_pages[(target.page_id,target.scope)]=expiry
+        for job in self.jobs.values():
+            if job.mode!='delete_page_posts' or job.terminal: continue
+            for other in job.targets:
+                if self.block_reason(other):
+                    if other.status=='queued':
+                        other.status='blocked'
+                        other.reasons.append(reason)
+                    task=job.active.get(other.canonical)
+                    if other is not target and task is not None and not other.diagnostic.get('request_started'):
+                        task.cancel()
+            self._complete_real(job)
+            try: self.persist(job)
+            except AppError: pass
+
+    def release_real(self,job,target,index,outcome):
+        if outcome.reason in {'permission_denied','token_invalid'}:
+            self.block_related(target,outcome.reason)
+        if target.status=='processing':
+            target.status=outcome.status
+            if outcome.reason not in target.reasons: target.reasons.append(outcome.reason)
+            if outcome.status=='queued' and not job.stop_requested:
+                self.buckets.setdefault(target.page_id,deque()).append((job.id,index))
+                if target.page_id not in self.rotation: self.rotation.append(target.page_id)
+                job.state='cooldown'
+            elif outcome.status=='queued': target.status='cancelled'
+        self.locks.discard(target.canonical)
+        self.success_reservations.discard(target.canonical)
+        job.active.pop(target.canonical,None)
+        self._complete_real(job)
+        try: self.persist(job,index)
+        except AppError: pass
+        self.changed.set()

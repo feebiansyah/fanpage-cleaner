@@ -10,6 +10,25 @@ from errors import AppError
 BYTES_PER_ITEM = 8192
 
 
+def invalidate_confirmed_post(store, page_id, target_id):
+    """Meta success stays success even if local cleanup fails."""
+    try:
+        store.audits.invalidate_post(page_id,target_id)
+        return None
+    except Exception:
+        # Safe fallback: suppress old snapshots and discard affected cached Page results.
+        # Do not retain exception strings, or convert a confirmed Meta success to uncertain.
+        try:
+            store.audits.removed_posts[(page_id,target_id)] = time.monotonic()+store.settings.session_ttl+store.settings.audit_ttl
+            for key in [k for k in store.audits.pages if k[1]==page_id]:
+                store.audits.pages.pop(key,None)
+            for sid,entry in list(store.audits.entries.items()):
+                if entry.data['page_id']==page_id: store.audits.entries.pop(sid,None)
+        except Exception:
+            pass
+        return 'cache_cleanup_failed'
+
+
 @dataclass
 class CachedAudit:
     data: dict = field(repr=False)

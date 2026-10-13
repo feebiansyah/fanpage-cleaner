@@ -77,14 +77,14 @@ class GraphClient:
           async with self.store.governor.slot(token_key, deadline):
             # Session/audit/confirmation may expire while waiting. Fetch token only now.
             observation['phase']='target_validation'
-            token = token_at_dispatch()
             endpoint = 'https://graph.facebook.com/v26.0/'+target_id
             try:
                 remaining = deadline-time.monotonic()
                 if remaining <= 0:
                     raise AppError('confirmation_expired',409)
                 async def send():
-                    nonlocal instruction
+                    nonlocal instruction, token
+                    token = await self.store.governor.pace_dispatch(token_key, deadline, token_at_dispatch)
                     observation.update(phase='request_dispatch',request_started=True)
                     async with self.http.stream('DELETE', endpoint, headers={'Authorization':'Bearer '+token}) as response:
                         status = response.status_code
@@ -120,9 +120,9 @@ class GraphClient:
                             return None
                 payload = await asyncio.wait_for(send(), min(remaining, self.settings.request_timeout))
             except (asyncio.TimeoutError, httpx.TimeoutException):
-                return result('uncertain','timeout_after_send')
+                return result('uncertain','timeout_after_send') if observation['request_started'] else result('failed','timeout_before_send')
             except httpx.HTTPError:
-                return result('uncertain','network_after_send')
+                return result('uncertain','network_after_send') if observation['request_started'] else result('failed','network_before_send')
             finally:
                 token = ''
             observation['phase']='response_classification'
@@ -377,8 +377,7 @@ class GraphClient:
     @asynccontextmanager
     async def _stream(self,token,token_key,endpoint,params,deadline,on_request):
         async with self.store.governor.slot(token_key,deadline):
-            if on_request is not None:
-                on_request()
+            await self.store.governor.pace_dispatch(token_key,deadline,on_request)
             async with self.http.stream('GET',endpoint,params=params,headers={'Authorization':'Bearer '+token}) as response:
                 self._usage(response.headers,token_key)
                 yield response

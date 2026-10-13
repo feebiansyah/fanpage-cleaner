@@ -121,8 +121,9 @@ class SingleDelete(unittest.IsolatedAsyncioTestCase):
         cid=(await self.prepare()).json()['confirmation_id']
         with patch.object(self.store.audits,'invalidate_post',side_effect=KeyError(TOKEN)):
             result=(await self.execute(cid)).json()
-        self.assertEqual(result['reason'],'internal_error')
-        self.assertEqual(result['diagnostic']['internal_code'],'cache_invalidation.key_error')
+        self.assertEqual(result['reason'],'success_boolean_true')
+        self.assertEqual(result['outcome'],'succeeded')
+        self.assertEqual(result['cleanup_warning'],'cache_cleanup_failed')
         self.assertEqual(result['diagnostic']['http_status'],200)
         self.assertTrue(result['diagnostic']['json_parsed'])
         self.assertNotIn(TOKEN,str(result))
@@ -295,6 +296,9 @@ class SingleDelete(unittest.IsolatedAsyncioTestCase):
 
     async def test_token_permission_rate_limit_and_shared_cooldown(self):
         for code, expected in [(190,'token_invalid'),(10,'permission_denied'),(4,'rate_limited')]:
+            # Each fixture represents an independent response, not a known blocked scope.
+            self.app.state.bulk.blocked_scopes.clear()
+            self.app.state.bulk.blocked_pages.clear()
             self.response = httpx.Response(400,json={'error':{'message':TOKEN,'code':code,'error_subcode':77}},headers={'Retry-After':'120'} if code==4 else {})
             cid = (await self.prepare()).json()['confirmation_id']
             result = (await self.execute(cid)).json()

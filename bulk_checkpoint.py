@@ -8,7 +8,7 @@ from pathlib import Path
 
 JOB_KEYS={'version','job_id','owner_id','created_at','state','mode','targets'}
 TARGET_KEYS={'page_id','key','object_id','canonical','delete_target','operation','eligible','reasons','status','attempts'}
-STATES={'queued','processing','dry_run_checked','succeeded','failed','uncertain','cancelled'}
+STATES={'queued','processing','dry_run_checked','succeeded','failed','uncertain','cancelled','blocked'}
 
 
 class Checkpoints:
@@ -39,13 +39,13 @@ class Checkpoints:
         return files
 
     def _validate(self,record):
-        if not isinstance(record,dict) or set(record) not in (JOB_KEYS,JOB_KEYS|{'generation'}) or type(record.get('version')) is not int or record.get('version')!=1 or record.get('mode')!='dry_run':
+        if not isinstance(record,dict) or set(record) not in (JOB_KEYS,JOB_KEYS|{'generation'}) or type(record.get('version')) is not int or record.get('version')!=1 or record.get('mode') not in {'dry_run','delete_page_posts'}:
             raise ValueError('invalid checkpoint')
         if 'generation' in record and (not isinstance(record['generation'],str) or not re.fullmatch('[a-f0-9]{32}',record['generation'])):
             raise ValueError('invalid generation')
         if not all(isinstance(record.get(k),str) and re.fullmatch('[a-f0-9]{32}',record[k]) for k in ('job_id','owner_id')):
             raise ValueError('invalid checkpoint identity')
-        if record.get('state') not in {'queued','running','completed','cancelled','failed','paused_needs_reconnect'}:
+        if record.get('state') not in {'queued','running','cooldown','stopping','completed','cancelled','failed','paused_needs_reconnect'}:
             raise ValueError('invalid state')
         if type(record.get('created_at')) not in {int,float} or not 0<record['created_at']<=time.time()+60:
             raise ValueError('invalid creation time')

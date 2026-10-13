@@ -23,6 +23,8 @@ from bulk_scheduler import BulkScheduler
 from bulk_checkpoint import Checkpoints
 from bulk_targets import validate_selections
 from single_delete import SingleDelete
+from bulk_delete import BulkDelete
+from bulk_executor import PagePostExecutor
 from dataclasses import replace
 
 
@@ -124,6 +126,7 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
             application.state.http = http
             application.state.graph = GraphClient(http, settings, application.state.store)
             application.state.jobs.bind(application.state.graph)
+            application.state.bulk_scheduler.real_executor=PagePostExecutor(application.state.graph,application.state.bulk)
             cleanup = asyncio.create_task(cleanup_loop(application.state.store))
             await application.state.bulk_scheduler.start()
             try:
@@ -146,6 +149,8 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     application.state.store.bulk_queue=application.state.bulk
     application.state.single_delete=SingleDelete(application.state.store,application.state.bulk)
     application.state.store.single_delete=application.state.single_delete
+    application.state.bulk_delete=BulkDelete(application.state.store,application.state.bulk,application.state.single_delete)
+    application.state.store.bulk_delete=application.state.bulk_delete
     application.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1"])
     application.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
@@ -367,9 +372,40 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         check_origin(request,settings)
         return application.state.single_delete.last(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE))
 
+    @application.post('/api/bulk-delete/prepare')
+    async def prepare_bulk_delete(request: Request):
+        payload=await single_delete_body(request)
+        return application.state.bulk_delete.prepare(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload)
+
+    @application.post('/api/bulk-delete/confirm')
+    async def confirm_bulk_delete(request: Request):
+        payload=await single_delete_body(request)
+        return application.state.bulk_delete.confirm(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload)
+
+    @application.get('/api/bulk-delete/jobs/active')
+    async def active_bulk_delete(request: Request):
+        check_origin(request,settings)
+        return application.state.bulk_delete.active(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE))
+
+    def owned_real(request,job_id,mutation=False):
+        check_origin(request,settings,mutation=mutation)
+        return application.state.bulk_delete.owned(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),job_id)
+
+    @application.get('/api/bulk-delete/jobs/{job_id}')
+    async def real_bulk_status(request: Request,job_id: str):
+        return application.state.bulk.snapshot(owned_real(request,job_id))
+
+    @application.post('/api/bulk-delete/jobs/{job_id}/stop')
+    async def real_bulk_stop(request: Request,job_id: str):
+        job=owned_real(request,job_id,True)
+        application.state.bulk.cancel(job)
+        return application.state.bulk.snapshot(job)
+
     def owned_dry(request,job_id,mutation=False):
         check_origin(request,settings,mutation=mutation)
-        return application.state.bulk.owned(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),job_id)
+        job=application.state.bulk.owned(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),job_id)
+        if job.mode!='dry_run': raise AppError('dry_job_not_found',404)
+        return job
 
     @application.get("/api/dry-run/jobs/{job_id}")
     async def dry_status(request: Request,job_id: str,offset: int=0):

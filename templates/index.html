@@ -64,14 +64,17 @@
       </div>
       <nav id="local-pagination" class="local-pagination" aria-label="Halaman daftar audit lokal"></nav>
       <div class="actions">
-        <button class="danger" type="button" disabled aria-describedby="availability">Hapus Terpilih</button>
+        <button id="delete-selected" class="danger" type="button" disabled>Hapus Terpilih</button>
+        <button id="bulk-read" class="secondary" type="button" disabled>Baca Antrean Penghapusan</button>
         <button id="delete-one" class="danger" type="button" disabled>Hapus 1 Post</button>
         <button id="delete-read-last" class="secondary" type="button" disabled>Baca Hasil Hapus Terakhir</button>
         <button id="dry-run" type="button" disabled>Periksa Penghapusan (Dry Run)</button>
         <button id="stop-load" class="secondary" type="button" disabled aria-describedby="load-status">Berhenti</button>
       </div>
-      <p id="delete-status" class="help" role="status" aria-live="polite">Pilih tepat satu konten. Backend memeriksa ID Page Post asli; teks/foto/link/video dapat dicoba melalui ID Post. Story teridentifikasi dan bulk tetap ditolak.</p>
+      <p id="delete-status" class="help" role="status" aria-live="polite">Pilih tepat satu konten. Backend memeriksa ID Page Post asli; teks/foto/link/video dapat dicoba melalui ID Post. Story teridentifikasi ditolak; Hapus Terpilih memerlukan pemeriksaan manual subset Page Post.</p>
       <div id="delete-diagnosis" class="help" role="status" aria-live="polite" aria-label="Diagnosis aman hasil hapus"></div>
+      <p id="bulk-status" class="help" role="status" aria-live="polite">Antrean penghapusan belum berjalan.</p>
+      <div id="bulk-results" class="help"></div>
       <p id="dry-status" class="help" role="status" aria-live="polite">Dry run belum berjalan. Tidak ada penghapusan nyata.</p>
       <div id="dry-results" class="help" aria-label="Hasil pemeriksaan target dry run"></div>
       <nav id="dry-pagination" class="local-pagination" aria-label="Halaman hasil dry run lokal"></nav>
@@ -99,6 +102,13 @@
       <button id="delete-cancel" class="secondary" type="button">Batal</button>
       <button id="delete-confirm" class="danger" type="button" disabled>Konfirmasi Hapus</button>
     </div>
+  </dialog>
+<dialog id="bulk-dialog" aria-labelledby="bulk-title">
+    <h2 id="bulk-title">Konfirmasi Hapus Terpilih</h2>
+    <div id="bulk-details"></div>
+    <p class="notice">Penghapusan tidak dapat dibatalkan. Hanya subset yang didukung di bawah ini akan dikirim.</p>
+    <label class="checkbox-label"><input id="bulk-manual-check" type="checkbox">Saya sudah memeriksa seluruh link dan daftar target yang didukung, memastikan semuanya Page Post yang ingin dihapus dan bukan Story. Pengecualian Story otomatis belum lengkap. Penghapusan Page Post tidak menjamin penghapusan media atau Reel terpisah.</label>
+    <div class="actions"><button id="bulk-cancel" type="button" class="secondary">Batal</button><button id="bulk-confirm" type="button" class="danger" disabled>Konfirmasi Hapus Terpilih</button></div>
   </dialog>
 </body>
 </html>

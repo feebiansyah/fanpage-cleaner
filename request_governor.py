@@ -11,6 +11,7 @@ class RequestGovernor:
         self.interval=settings.graph_request_interval
         self.usage_known=False
         self.next_at=0
+        self.last_dispatch_at=0
         self.lock=asyncio.Lock()
         self.slots=asyncio.Semaphore(settings.graph_request_concurrency)
 
@@ -39,6 +40,28 @@ class RequestGovernor:
             if not task.cancelled() and task.exception() is None and task.result():
                 primitive.release()
             raise
+
+    async def pace_dispatch(self, scope, deadline, before_send=None):
+        """Recheck spacing after local preflight, immediately before the HTTP call."""
+        await self._acquire(self.lock, deadline)
+        try:
+            while time.perf_counter() < self.last_dispatch_at + self.interval:
+                wait=self.last_dispatch_at+self.interval-time.perf_counter()
+                if time.monotonic()+wait >= deadline:
+                    raise AppError('timeout',504)
+                await asyncio.sleep(wait)
+            self.store.check_cooldown(scope)
+            if time.monotonic() >= deadline:
+                raise AppError('timeout',504)
+            value=before_send() if before_send is not None else None
+            if time.monotonic() >= deadline:
+                raise AppError('timeout',504)
+            # Preflight can write a checkpoint synchronously. Measure after it completes.
+            self.last_dispatch_at=time.perf_counter()
+            self.next_at=max(self.next_at,self.last_dispatch_at+self.interval)
+            return value
+        finally:
+            self.lock.release()
 
     @asynccontextmanager
     async def slot(self, scope, deadline):

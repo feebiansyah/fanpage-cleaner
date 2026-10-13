@@ -1,4 +1,4 @@
-"""Fixed workers, shared governor/cooldown, local dry-run executor only."""
+"""Fixed workers and shared governor/cooldown for dry run and confirmed Page Posts."""
 import asyncio
 import time
 import math
@@ -13,6 +13,7 @@ class BulkScheduler:
         self.executor=executor or DryRunExecutor()  # Test-only Python injection; no HTTP/config selector.
         self.workers=[]
         self.stopping=False
+        self.real_executor=None
 
     async def start(self):
         self.stopping=False
@@ -31,6 +32,8 @@ class BulkScheduler:
                 continue
             job,target,index=picked
             async def execute():
+                if job.mode=='delete_page_posts':
+                    return await self.real_executor.check(job,target,index)
                 if job.terminal: return Outcome('cancelled','dispatch_cancelled')
                 session,page=q.store.require_page(job.browser_id,job.session_id,target.page_id)
                 scope=q.store.token_key(page.access_token)
@@ -56,7 +59,7 @@ class BulkScheduler:
             try:
                 outcome=await task
             except asyncio.CancelledError:
-                outcome=Outcome('uncertain','interrupted_processing')
+                outcome=Outcome('uncertain','interrupted_processing') if job.mode!='delete_page_posts' or target.diagnostic.get('request_started') else Outcome('blocked' if q.block_reason(target) else 'cancelled',q.block_reason(target) or job.stop_reason or 'dispatch_cancelled')
             except AppError as error:
                 if error.code in {'cooldown','rate_limited'}:
                     outcome=Outcome('failed',error.code,True,error.retry_after or 1)
@@ -73,6 +76,5 @@ class BulkScheduler:
         self.queue.stopping=True
         for job in self.queue.jobs.values():
             if not job.terminal: self.queue.pause(job,'shutdown')
-        for task in self.workers: task.cancel()
         for task in self.workers:
             with suppress(asyncio.CancelledError): await task

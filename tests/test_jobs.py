@@ -312,7 +312,11 @@ class JobContract(LoadFixture):
 
     async def test_early_windows_deadline_timer_does_not_report_expiry_early(self):
         deadline=time.monotonic()+.03
+        original_wait_for=asyncio.wait_for
         async def early_timer(coro, timeout):
+            # asyncio is shared with idle queue workers: only simulate the Graph timer.
+            if getattr(getattr(coro,'cr_code',None),'co_name',None)!='_get':
+                return await original_wait_for(coro,timeout)
             coro.close()
             raise asyncio.TimeoutError()
         graph=self.application.state.graph

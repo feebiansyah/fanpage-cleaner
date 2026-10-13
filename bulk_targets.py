@@ -1,5 +1,5 @@
 """Trusted audit metadata -> identities. No user supplied delete identifiers."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from content import identifier
 from errors import AppError
 
@@ -17,6 +17,10 @@ class Target:
     status: str = 'queued'
     attempts: int = 0
     retry_at: float = 0
+    details: dict = field(default_factory=dict,repr=False)
+    diagnostic: dict = field(default_factory=dict,repr=False)
+    cleanup_warning: str | None = None
+    scope: str = field(default='',repr=False)
 
     def public(self):
         return {key:getattr(self,key) for key in ('page_id','key','object_id','canonical','delete_target','operation','eligible','reasons','status','attempts')}

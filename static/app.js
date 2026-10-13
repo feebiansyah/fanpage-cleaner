@@ -28,6 +28,20 @@
   const deleteStatus = document.getElementById("delete-status");
   const deleteDiagnosis = document.getElementById("delete-diagnosis");
   const readLastButton = document.getElementById("delete-read-last");
+  const bulkButton = document.getElementById("delete-selected");
+  const bulkDialog = document.getElementById("bulk-dialog");
+  const bulkDetails = document.getElementById("bulk-details");
+  const bulkManual = document.getElementById("bulk-manual-check");
+  const bulkCancel = document.getElementById("bulk-cancel");
+  const bulkConfirm = document.getElementById("bulk-confirm");
+  const bulkStatus = document.getElementById("bulk-status");
+  const bulkResults = document.getElementById("bulk-results");
+  const bulkRead = document.getElementById("bulk-read");
+  let bulkPrepared = null, bulkPreparing = false, bulkSubmitting = false, bulkJob = null;
+  let bulkPreviewGeneration = 0, bulkPollGeneration = 0;
+  let bulkGeneration = 0, bulkTimer = null, bulkExpiry = null, bulkReading = false, bulkStopping = false;
+  const bulkActive = () => bulkSubmitting || Boolean(bulkJob && !bulkJob.terminal);
+  const bulkBusy = () => bulkActive() || bulkPreparing || Boolean(bulkPrepared);
   let readingLast = false;
   let deleteReportGeneration = 0;
   let deletion = null;
@@ -77,7 +91,7 @@
   }
 
   function controls() {
-    const deleting = deletePreparing || deleteExecuting || Boolean(deletion);
+    const deleting = deletePreparing || deleteExecuting || Boolean(deletion) || bulkBusy();
     connectButton.disabled = !ready || busy || postsLoading || dryLoading || deleting || Date.now() < cooldownUntil;
     disconnectButton.disabled = !ready || busy || !connected;
     tokenInput.disabled = busy;
@@ -91,8 +105,13 @@
     deleteCancel.disabled = deleteExecuting;
     deleteManual.disabled = deleteExecuting;
     readLastButton.disabled = !ready || busy || !connected || readingLast;
-    stopButton.disabled = (!postsLoading && !dryLoading) || stopping;
-    stopButton.textContent = dryLoading ? "Berhenti dry run" : postsLoading ? "Berhenti memuat" : "Berhenti";
+    bulkButton.disabled = !ready || busy || postsLoading || dryLoading || deleting || !connected || !selected.size || Date.now() < cooldownUntil;
+    bulkConfirm.disabled = !bulkPrepared || !bulkPrepared.supported || !bulkManual.checked || bulkSubmitting || Date.now() < cooldownUntil;
+    bulkCancel.disabled = bulkSubmitting;
+    bulkManual.disabled = bulkSubmitting;
+    bulkRead.disabled = !ready || !connected || busy || bulkReading || bulkSubmitting || bulkPreparing || Boolean(bulkPrepared) || postsLoading || dryLoading || deleteExecuting;
+    stopButton.disabled = (!postsLoading && !dryLoading && !bulkActive()) || stopping || bulkStopping || bulkSubmitting;
+    stopButton.textContent = bulkActive() ? "Berhenti penghapusan" : dryLoading ? "Berhenti dry run" : postsLoading ? "Berhenti memuat" : "Berhenti";
     maxPosts.disabled = postsLoading || busy;
     loadButton.textContent = postsLoading ? "Sedang memuat…" : "Load Posts";
     loadStatus.setAttribute("aria-busy", String(postsLoading));
@@ -190,8 +209,10 @@
     deleteReportGeneration += 1;
     deleteDiagnosis.replaceChildren();
     closeDelete();
+    closeBulk();
+    if (!connected) clearBulk();
     deleteSelectionHint = null;
-    deleteStatus.textContent = "Pilih tepat satu konten. Backend akan memeriksa ID Page Post sebelum konfirmasi; bulk tetap nonaktif.";
+    deleteStatus.textContent = "Pilih tepat satu konten. Backend akan memeriksa ID Page Post sebelum konfirmasi; Hapus Terpilih memerlukan konfirmasi manual.";
     cancelDry();
     dryResults.replaceChildren();
     dryPagination.replaceChildren();
@@ -535,6 +556,7 @@
       `Content-type: ${diagnostic.content_type || "tidak tersedia"}; JSON terparse: ${flag(diagnostic.json_parsed)}; tipe root JSON: ${diagnostic.json_type || "tidak tersedia"}; tipe success: ${diagnostic.success_type || "tidak tersedia"}; field error ada: ${flag(diagnostic.has_error_field)}.`,
       `Tahap: ${diagnostic.phase || "tidak tersedia"}; masalah respons: ${diagnostic.response_issue || "tidak tersedia"}; kode internal: ${diagnostic.internal_code || "tidak tersedia"}.`
     ];
+    if (result.cleanup_warning || diagnostic.cleanup_warning) lines.push("Peringatan cleanup: cache_cleanup_failed. Respons sukses Meta tetap sukses; tampilan target telah diinvalidasi.");
     for (const text of lines) {
       const line = document.createElement("p");
       line.textContent = text;
@@ -560,7 +582,7 @@
 
   deleteButton.addEventListener("click", async () => {
     const item = onePost();
-    if (!ready || !connected || busy || postsLoading || dryLoading || deletePreparing || deleteExecuting || deletion || Date.now() < cooldownUntil || !item) return;
+    if (!ready || !connected || busy || postsLoading || dryLoading || deletePreparing || deleteExecuting || deletion || bulkBusy() || Date.now() < cooldownUntil || !item) return;
     const pageId = fanpageSelect.value;
     const generation = ++deleteGeneration;
     deletePreparing = true;
@@ -657,6 +679,124 @@
       controls();
     }
   });
+  function closeBulk() {
+    bulkPreviewGeneration += 1;
+    clearTimeout(bulkExpiry);
+    bulkPrepared = null;
+    bulkPreparing = false;
+    bulkDialog.close();
+    bulkManual.checked = false;
+    bulkDetails.replaceChildren();
+  }
+  function clearBulk() {
+    bulkGeneration += 1; clearTimeout(bulkTimer); closeBulk();
+    bulkJob = null; bulkSubmitting = false;
+    bulkResults.replaceChildren(); bulkStatus.textContent = "Antrean penghapusan belum berjalan.";
+  }
+  function bulkLine(parent, text) {
+    const line = document.createElement("p"); line.textContent = text; parent.appendChild(line);
+  }
+  function bulkTarget(parent, item) {
+    const details = item.details || item;
+    bulkLine(parent, `Fanpage: ${details.page_name || item.page_id || ""}; key: ${item.key}; target Page Post: ${details.target_id || item.delete_target || "tidak tersedia"}; jenis: ${details.kind || ""}; teks: ${details.text || "Tanpa teks"}.`);
+    const url = safeAuditURL(details.permalink);
+    if (url) {
+      const link = document.createElement("a"); link.textContent = "Periksa target di Facebook";
+      link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; parent.appendChild(link);
+    }
+  }
+  function renderBulk(data) {
+    bulkJob = data;
+    const counts = data.counts || {};
+    bulkStatus.textContent = `${(data.pages || []).map(page => page.name).join(", ")}: ${data.state}; selesai ${data.completed}/${data.total}; dipilih ${data.selected}, target ${data.total}, duplikat ${data.duplicates}. Antrean ${counts.queued || 0}, memproses ${counts.processing || 0}, berhasil ${counts.succeeded || 0}, gagal ${counts.failed || 0}, uncertain ${counts.uncertain || 0}, blocked ${counts.blocked || 0}, dibatalkan ${counts.cancelled || 0}. Penghapusan Page Post; Story belum diverifikasi otomatis seluruhnya.`;
+    bulkResults.replaceChildren();
+    for (const item of data.items || []) {
+      const row = document.createElement("details");
+      const summary = document.createElement("summary"); summary.textContent = `${item.key}: ${item.status}`; row.appendChild(summary);
+      bulkTarget(row, item);
+      bulkLine(row, `Status: ${item.status}; percobaan: ${item.attempts || 0}; alasan: ${(item.reasons || []).join(", ")}; cleanup: ${item.cleanup_warning || "tidak ada"}.`);
+      const diag = item.diagnostic || {};
+      // Deliberate allowlist: never dump response bodies, headers or tokens.
+      for (const key of ["reason","http_status","error_code","error_subcode","duration_ms","content_type","json_parsed","json_type","success_type","has_error_field","phase","response_issue","internal_code"])
+        if (diag[key] !== undefined && diag[key] !== null) bulkLine(row, `${key}: ${diag[key]}`);
+      bulkResults.appendChild(row);
+      if (item.status === "succeeded" && loadedAudit?.page_id === item.page_id) {
+        loadedAudit.items = loadedAudit.items.filter(target => {
+          const matches = target.key === item.key || (target.sources || []).some(source =>
+            source.source === "published_posts" && source.object_id === item.delete_target);
+          if (matches) selected.delete(target.key);
+          return !matches;
+        });
+      }
+    }
+    if (loadedAudit) {
+      loadedAudit.displayed = loadedAudit.items.length;
+      displayPage = Math.min(displayPage, Math.max(0, Math.ceil(loadedAudit.items.length / DISPLAY_SIZE) - 1));
+      renderAuditPage();
+    }
+    controls();
+  }
+  function pollBulk() {
+    const pollGeneration = ++bulkPollGeneration;
+    clearTimeout(bulkTimer);
+    if (!connected || !bulkJob || bulkJob.terminal) return;
+    const generation = bulkGeneration, id = bulkJob.job_id;
+    bulkTimer = setTimeout(async () => {
+      if (generation !== bulkGeneration || pollGeneration !== bulkPollGeneration || !connected) return;
+      try {
+        const data = await api(`/api/bulk-delete/jobs/${encodeURIComponent(id)}`);
+        if (generation === bulkGeneration && pollGeneration === bulkPollGeneration && connected && bulkJob?.job_id === id) { renderBulk(data); pollBulk(); }
+      } catch (error) { if (generation === bulkGeneration) bulkStatus.textContent = error.message + " Gunakan Baca Antrean Penghapusan; konfirmasi tidak diulang."; }
+    }, 1000);
+  }
+  bulkButton.addEventListener("click", async () => {
+    if (bulkButton.disabled || bulkBusy() || !connected || !selected.size) return;
+    const pageId = fanpageSelect.value, generation = bulkGeneration, previewGeneration = ++bulkPreviewGeneration;
+    const keys = [...selected];
+    bulkPreparing = true; controls();
+    bulkStatus.textContent = "Menyiapkan daftar target lokal. Belum ada DELETE dikirim.";
+    try {
+      const data = await api("/api/bulk-delete/prepare", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({selections:[{page_id:pageId,keys}]})});
+      if (!connected || generation !== bulkGeneration || pageId !== fanpageSelect.value || previewGeneration !== bulkPreviewGeneration || !bulkPreparing) return;
+      bulkPrepared = data; bulkManual.checked = false; bulkDetails.replaceChildren();
+      bulkLine(bulkDetails, `Dipilih ${data.selected}; didukung ${data.supported}; ditolak ${data.unsupported}; duplikat ${data.duplicates}. Maksimal ${data.max_targets || 20} target. Konfirmasi berlaku ${data.expires_in_seconds} detik.`);
+      for (const item of data.items || []) {
+        const row = document.createElement("details"); row.open = true;
+        const summary = document.createElement("summary"); summary.textContent = `${item.supported ? "Didukung" : "DITOLAK"}: ${item.key}`; row.appendChild(summary);
+        bulkTarget(row, item); bulkLine(row, item.message || item.reason || "Target Page Post"); bulkDetails.appendChild(row);
+      }
+      bulkDialog.showModal();
+      bulkExpiry = setTimeout(() => { if (!bulkSubmitting && bulkPrepared === data) { closeBulk(); bulkStatus.textContent = "Konfirmasi kedaluwarsa. Periksa daftar kembali."; controls(); } }, Math.max(0,data.expires_in_seconds)*1000);
+    } catch (error) { if (generation === bulkGeneration && previewGeneration === bulkPreviewGeneration && connected) bulkStatus.textContent = error.message; }
+    finally { if (previewGeneration === bulkPreviewGeneration) bulkPreparing = false; controls(); }
+  });
+  bulkManual.addEventListener("change", controls);
+  bulkCancel.addEventListener("click", () => { if (!bulkSubmitting) { closeBulk(); controls(); } });
+  bulkDialog.addEventListener("cancel", event => { event.preventDefault(); if (!bulkSubmitting) { closeBulk(); controls(); } });
+  bulkConfirm.addEventListener("click", async () => {
+    if (!bulkPrepared || !bulkPrepared.supported || !bulkManual.checked || bulkSubmitting || !connected || Date.now() < cooldownUntil) return;
+    const snapshot = bulkPrepared, generation = bulkGeneration;
+    bulkSubmitting = true; clearTimeout(bulkExpiry); clearOldDryReport(); controls();
+    bulkStatus.textContent = "Mengirim konfirmasi satu kali. Jangan ulang penghapusan jika respons hilang.";
+    try {
+      const data = await api("/api/bulk-delete/confirm", {method:"POST", headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmation_id:snapshot.confirmation_id,manual_targets_confirmed:true})});
+      if (generation !== bulkGeneration || !connected) return;
+      closeBulk(); renderBulk(data); pollBulk();
+    } catch (error) { if (generation === bulkGeneration && connected) { closeBulk(); bulkStatus.textContent = error.message + " Hasil belum pasti. Gunakan Baca Antrean Penghapusan tanpa mengulang konfirmasi."; } }
+    finally { if (generation === bulkGeneration) bulkSubmitting = false; controls(); }
+  });
+  bulkRead.addEventListener("click", async () => {
+    if (bulkRead.disabled || bulkReading || !connected) return;
+    const generation = bulkGeneration; bulkReading = true; controls();
+    try {
+      const data = await api("/api/bulk-delete/jobs/active");
+      if (generation !== bulkGeneration || !connected) return;
+      const job = data.jobs?.[0] || data.last_job;
+      if (job) { renderBulk(job); pollBulk(); }
+      else bulkStatus.textContent = "Antrean lokal tidak tersedia; hasil mungkin hilang setelah restart. Jangan ulang DELETE untuk diagnosis.";
+    } catch (error) { if (generation === bulkGeneration) bulkStatus.textContent = error.message; }
+    finally { bulkReading = false; controls(); }
+  });
   fanpageSelect.addEventListener("change", () => {
     if (activePageId !== fanpageSelect.value) {
       activePageId = fanpageSelect.value;
@@ -671,7 +811,7 @@
   });
 
   loadButton.addEventListener("click", async () => {
-    if (!ready || busy || postsLoading || starting || stopping || !connected || !fanpageSelect.value || Date.now() < cooldownUntil) return;
+    if (!ready || busy || postsLoading || starting || stopping || bulkBusy() || !connected || !fanpageSelect.value || Date.now() < cooldownUntil) return;
     const rawLimit = maxPosts.value;
     const limit = Number(rawLimit);
     if (!/^[0-9]+$/.test(rawLimit) || !Number.isSafeInteger(limit) || limit < 1 || limit > 5000) {
@@ -733,6 +873,17 @@
   });
 
   stopButton.addEventListener("click", async () => {
+    if (bulkActive()) {
+      if (!bulkJob || bulkSubmitting || bulkStopping) return;
+      const generation = bulkGeneration;
+      bulkStopping = true; bulkPollGeneration += 1; clearTimeout(bulkTimer); controls();
+      try {
+        const data = await api(`/api/bulk-delete/jobs/${encodeURIComponent(bulkJob.job_id)}/stop`, {method:"POST"});
+        if (generation === bulkGeneration && connected) { renderBulk(data); pollBulk(); }
+      } catch (error) { if (generation === bulkGeneration) bulkStatus.textContent = error.message + " Baca antrean lokal; jangan ulang konfirmasi."; }
+      finally { bulkStopping = false; controls(); }
+      return;
+    }
     if (dryLoading) {
       const id=dryJobId;
       dryGeneration += 1;
@@ -765,7 +916,7 @@
   });
 
   dryButton.addEventListener("click", async () => {
-    if (!ready || busy || postsLoading || dryLoading || !connected || selected.size === 0) return;
+    if (!ready || busy || postsLoading || dryLoading || bulkBusy() || !connected || selected.size === 0) return;
     const pageId=fanpageSelect.value;
     const generation=++dryGeneration;
     dryLoading=true;

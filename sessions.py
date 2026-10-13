@@ -67,6 +67,7 @@ class MemoryStore:
         self.content_jobs = None
         self.bulk_queue = None
         self.single_delete = None
+        self.bulk_delete = None
         self.governor = RequestGovernor(self,settings)
 
     def cleanup(self):
@@ -75,6 +76,8 @@ class MemoryStore:
             del self.sessions[key]
         if self.single_delete is not None:
             self.single_delete.cleanup()
+        if self.bulk_delete is not None:
+            self.bulk_delete.cleanup()
         if self.content_jobs is not None:
             self.content_jobs.cleanup()
         if self.bulk_queue is not None:
@@ -252,6 +255,8 @@ class MemoryStore:
         self.audits.release(session_id)
 
     def clear(self):
+        if self.bulk_delete is not None:
+            self.bulk_delete.confirmations.clear()
         if self.single_delete is not None:
             self.single_delete.confirmations.clear()
             self.single_delete.diagnostics.clear()

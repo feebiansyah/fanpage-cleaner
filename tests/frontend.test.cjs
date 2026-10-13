@@ -25,7 +25,7 @@ function setup(responses) {
     'load-posts', 'max-posts', 'content-list', 'select-all', 'selected-count', 'load-status', 'audit-warning', 'local-pagination', 'load-progress',
     'fanpage-search', 'fanpage-search-status', 'source-diagnostics', 'stop-load', 'dry-run', 'dry-status', 'dry-results', 'dry-pagination',
     'delete-one', 'delete-dialog', 'delete-details', 'delete-manual-check', 'delete-cancel', 'delete-confirm', 'delete-status',
-    'delete-diagnosis', 'delete-read-last'];
+    'delete-diagnosis', 'delete-read-last', 'delete-selected', 'bulk-dialog', 'bulk-details', 'bulk-manual-check', 'bulk-cancel', 'bulk-confirm', 'bulk-status', 'bulk-results', 'bulk-read'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id === 'fanpage' ? 'select' : 'div')]));
   elements['max-posts'].value = '100';
   const requests = [];
@@ -740,4 +740,81 @@ test('late dry run result from old Page is hidden and cancelled', async () => {
   release();await work;await tick();
   assert.equal(elements['dry-results'].children.length,0);
   assert.ok(requests.some(r=>r.path.endsWith('/stop')));
+});
+
+const bulkPreview = {confirmation_id:'bulk-cid',expires_in_seconds:60,selected:2,supported:1,unsupported:1,duplicates:0,max_targets:20,
+  items:[{supported:true,page_id:'11',page_name:'Original Page',key:'published_posts:11_0',target_id:'11_0',kind:'Foto',text:'<script>safe</script>',permalink:'https://www.facebook.com/11/posts/0'},
+    {supported:false,page_id:'11',page_name:'Original Page',key:'published_posts:11_1',kind:'Story',reason:'identified_story',message:'Story ditolak'}]};
+const bulkJob = {job_id:'bulk-job',terminal:true,state:'completed',selected:2,total:1,duplicates:0,completed:1,succeeded:1,pages:[{page_id:'11',name:'Original Page'}],
+  counts:{queued:0,processing:0,succeeded:1,failed:0,uncertain:0,blocked:0,cancelled:0},items:[{page_id:'11',key:'published_posts:11_0',delete_target:'11_0',status:'succeeded',reasons:['success_boolean_true'],details:bulkPreview.items[0],diagnostic:{http_status:200,raw_body:'secret-token'}}]};
+test('bulk success invalidates aliases only through original published Post identity',async()=>{
+  const loaded=audit(3);
+  loaded.items[1].sources=[{source:'published_posts',object_id:'11_0'}, {source:'video_reels',object_id:'99',post_id:'11_0'}];
+  const {elements}=setup([connected,loaded,bulkPreview,bulkJob]);
+  await tick();await elements['load-posts'].events.click();choose(elements);
+  await elements['delete-selected'].events.click();elements['bulk-manual-check'].checked=true;
+  await elements['bulk-confirm'].events.click();
+  assert.equal(elements['content-list'].children.length,1);
+  assert.match(elements['bulk-status'].textContent,/selesai 1\/1/);
+});
+test('bulk previews supported subset once and confirms immutable keys without retry', async()=>{
+  const {elements,requests}=setup([connected,audit(2),bulkPreview,bulkJob]);
+  await tick(); await elements['load-posts'].events.click();
+  elements['select-all'].checked=true;elements['select-all'].events.change();
+  assert.equal(elements['delete-selected'].disabled,false);
+  await elements['delete-selected'].events.click();
+  assert.equal(elements['bulk-dialog'].open,true);
+  assert.match(elements['bulk-details'].children[0].textContent,/dipilih 2.*didukung 1.*ditolak 1/i);
+  elements['select-all'].checked=false;elements['select-all'].events.change();
+  elements['bulk-manual-check'].checked=true;
+  await elements['bulk-confirm'].events.click();await elements['bulk-confirm'].events.click();
+  assert.deepEqual(JSON.parse(requests[2].options.body),{selections:[{page_id:'11',keys:['published_posts:11_0','published_posts:11_1']}]});
+  assert.deepEqual(JSON.parse(requests[3].options.body),{confirmation_id:'bulk-cid',manual_targets_confirmed:true});
+  assert.equal(requests.length,4);assert.equal(elements['content-list'].children.length,1);
+  assert.equal(elements['dry-status'].hidden,true);
+  assert.doesNotMatch(JSON.stringify(elements['bulk-results'].children),/secret-token/);
+});
+
+test('bulk active job survives Page change and stop drains processing through local polling',async()=>{
+  const running={...bulkJob,terminal:false,state:'running',counts:{...bulkJob.counts,succeeded:0,queued:0,processing:1},items:[{...bulkJob.items[0],status:'processing'}]};
+  const {elements,requests,timers}=setup([{...connected,count:2,pages:[{id:'11',name:'Original Page'},{id:'22',name:'Other Page'}]},audit(2),bulkPreview,running,
+    {...running,state:'stopping'},bulkJob]);
+  await tick();await elements['load-posts'].events.click();choose(elements);
+  await elements['delete-selected'].events.click();elements['bulk-manual-check'].checked=true;await elements['bulk-confirm'].events.click();
+  assert.equal(elements['stop-load'].textContent,'Berhenti penghapusan');
+  assert.equal(elements['load-posts'].disabled,true);assert.equal(elements['dry-run'].disabled,true);assert.equal(elements['delete-one'].disabled,true);
+  elements.fanpage.value='22';elements.fanpage.events.change();
+  assert.match(elements['bulk-status'].textContent,/Original Page/);
+  assert.equal(requests.filter(r=>r.path.endsWith('/stop')).length,0);
+  await elements['stop-load'].events.click();assert.equal(elements['stop-load'].disabled,false);
+  const timer=timers.filter(t=>t.delay===1000).at(-1);await timer.fn();
+  assert.equal(requests.at(-1).path,'/api/bulk-delete/jobs/bulk-job');
+  assert.equal(elements['stop-load'].disabled,true);assert.equal(elements['content-list'].children.length,0);
+});
+test('lost bulk confirmation is never retried and recovers real job with local active read',async()=>{
+  const {elements,requests}=setup([connected,audit(1),bulkPreview,()=>{throw Error('lost confirmation response')},{jobs:[],last_job:bulkJob}]);
+  await tick();await elements['load-posts'].events.click();choose(elements);
+  await elements['delete-selected'].events.click();elements['bulk-manual-check'].checked=true;await elements['bulk-confirm'].events.click();
+  await elements['bulk-confirm'].events.click();
+  assert.match(elements['bulk-status'].textContent,/belum pasti/);
+  await elements['bulk-read'].events.click();
+  assert.equal(requests.filter(r=>r.path==='/api/bulk-delete/confirm').length,1);
+  assert.equal(requests.at(-1).path,'/api/bulk-delete/jobs/active');assert.match(elements['bulk-status'].textContent,/berhasil 1/);
+});
+test('bulk unsupported preview cannot confirm; changing Page closes it without enqueue',async()=>{
+  const preview={...bulkPreview,supported:0,unsupported:2,items:bulkPreview.items.map(item=>({...item,supported:false}))};
+  const {elements,requests}=setup([connected,audit(2),preview]);await tick();await elements['load-posts'].events.click();choose(elements);
+  await elements['delete-selected'].events.click();elements['bulk-manual-check'].checked=true;elements['bulk-manual-check'].events.change();
+  assert.equal(elements['bulk-confirm'].disabled,true);await elements['bulk-confirm'].events.click();
+  elements.fanpage.value='22';elements.fanpage.events.change();assert.equal(elements['bulk-dialog'].open,false);
+  assert.equal(requests.length,3);
+});
+test('session expiry cancels bulk polling and clears diagnostics without more requests',async()=>{
+  const running={...bulkJob,terminal:false,state:'running',items:[{...bulkJob.items[0],status:'uncertain'}]};
+  const {elements,requests,timers}=setup([{...connected,session_remaining_seconds:5},audit(1),bulkPreview,running]);
+  await tick();await elements['load-posts'].events.click();choose(elements);await elements['delete-selected'].events.click();
+  elements['bulk-manual-check'].checked=true;await elements['bulk-confirm'].events.click();
+  assert.equal(elements['content-list'].children.length,1);
+  timers.find(t=>t.delay===5000).fn();await timers.find(t=>t.delay===1000).fn();
+  assert.equal(elements['bulk-results'].children.length,0);assert.equal(elements['load-posts'].disabled,true);assert.equal(requests.length,4);
 });

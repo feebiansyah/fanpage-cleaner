@@ -240,13 +240,21 @@ class SchedulerContract(unittest.IsolatedAsyncioTestCase):
         self.store.governor.interval=.04
         class Fake:
             async def check(inner,target):
-                started.append(time.monotonic())
+                started.append(time.perf_counter())
                 return Outcome('dry_run_checked','local_identity_checked')
         job=self.add([self.target(n) for n in range(3)])
-        self.store.cooldown(self.store.token_key(PAGE_TOKEN),.08)
+        scope=self.store.token_key(PAGE_TOKEN)
+        # Keep the gate closed throughout the assertion, independent of disk/event-loop speed.
+        self.store.cooldown(scope,10)
         await self.run_scheduler(Fake())
         await asyncio.sleep(.03)
         self.assertEqual(started,[])
+        # Drain local pre-send cooldown failures before simulating expiry.
+        while job.active:
+            await asyncio.sleep(.01)
+        self.store.token_cooldowns[scope]=time.monotonic()-1
+        for target in job.targets:
+            target.retry_at=time.monotonic()-1
         await self.wait_complete(job)
         self.assertTrue(all(b-a>=.025 for a,b in zip(started,started[1:])))
         self.store.governor.observe_usage(85)

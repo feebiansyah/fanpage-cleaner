@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from content import identifier, safe_url
 from errors import AppError, MESSAGES
 from graph_api import delete_internal_code
+from content_cache import invalidate_confirmed_post
 
 
 CONFIRMATION_TTL = 60
@@ -146,7 +147,7 @@ class SingleDelete:
         canonical = 'post:'+entry.target['target_id']
         if canonical in self.queue.locks:
             raise AppError('target_busy', 409)
-        if len(self.store.audits.removed_posts)+sum(c.active for c in self.confirmations.values()) >= self.store.settings.max_audit_items:
+        if len(self.store.audits.removed_posts)+sum(c.active for c in self.confirmations.values())+len(self.queue.success_reservations) >= self.store.settings.max_audit_items:
             raise AppError('delete_capacity', 503)
         entry.used, entry.active = True, True  # Atomic single-use + canonical lock before any await.
         self.queue.locks.add(canonical)
@@ -164,14 +165,20 @@ class SingleDelete:
             if time.monotonic() >= entry.expires_at:
                 raise AppError('confirmation_expired', 409)
             _, current_page, _, current_identity = self.resolve(browser_id, sid, entry.target['page_id'], entry.target['key'])
+            current_scope=self.store.token_key(current_page.access_token)
+            if current_scope in self.queue.blocked_scopes: raise AppError('token_invalid',401)
+            if (entry.target['page_id'],current_scope) in self.queue.blocked_pages: raise AppError('permission_denied',403)
             if current_identity != entry.identity:
                 raise AppError('post_delete_unsupported', 409)
             return current_page.access_token
         try:
             outcome = await graph.delete_post_once(entry.target['target_id'], scope, deadline, token_at_dispatch, observation)
+            if outcome['reason'] in {'permission_denied','token_invalid'}:
+                from types import SimpleNamespace
+                self.queue.block_related(SimpleNamespace(page_id=entry.target['page_id'],scope=scope),outcome['reason'])
             if outcome['outcome'] == 'succeeded':
                 observation['phase']='cache_invalidation'
-                self.store.audits.invalidate_post(entry.target['page_id'], entry.target['target_id'])
+                outcome['cleanup_warning']=invalidate_confirmed_post(self.store,entry.target['page_id'],entry.target['target_id'])
         except AppError as error:
             outcome = {**observation,'outcome': 'uncertain' if observation.get('request_started') else 'failed',
                        'reason': 'internal_error' if observation.get('request_started') else error.code,
@@ -196,6 +203,7 @@ class SingleDelete:
                           'duration_ms':round((time.monotonic()-started)*1000),
                           'outcome':outcome['outcome'] if outcome else 'uncertain',
                           'reason':outcome['reason'] if outcome else 'interrupted',
+                          'cleanup_warning':outcome.get('cleanup_warning') if outcome else None,
                           **{key:outcome.get(key,observation.get(key)) if outcome else observation.get(key) for key in OBSERVATION_FIELDS}}
             self.diagnostics.append(diagnostic)
             reason = outcome['reason']

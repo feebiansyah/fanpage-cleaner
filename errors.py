@@ -1,6 +1,16 @@
 """Error tetap: tidak pernah menyertakan input, exception, atau pesan Meta."""
 
 MESSAGES = {
+    "timeout_before_send": "Batas waktu habis sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.",
+    "network_before_send": "Transport gagal sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.",
+    "bulk_limit": "Batas uji lokal penghapusan bulk maksimal 20 pilihan per konfirmasi (atau batas konfigurasi yang lebih kecil). Ini bukan batas Meta.",
+    "bulk_confirmation_not_found": "Konfirmasi bulk tidak tersedia atau bukan milik sesi browser ini.",
+    "bulk_no_supported_targets": "Tidak ada Page Post yang didukung pada snapshot ini. Tidak ada penghapusan dikirim.",
+    "bulk_job_not_found": "Pekerjaan penghapusan tidak tersedia pada sesi browser ini.",
+    "bulk_dispatch_stopped": "Dispatch baru dihentikan. Target belum dikirim tidak dianggap terhapus.",
+    "bulk_page_blocked": "Dispatch Page ini diblokir karena penolakan izin pada token terkait.",
+    "bulk_token_blocked": "Dispatch scope token ini diblokir karena token invalid.",
+    "bulk_target_deleted": "Page Post ini sudah dikonfirmasi berhasil dihapus oleh operasi lain; tidak dikirim ulang.",
     "invalid_single_delete": "Pilih tepat satu key Post audit; ID atau token bebas tidak diterima.",
     "post_delete_unsupported": "Snapshot target berubah setelah preview. Periksa ulang target sebelum menyiapkan konfirmasi baru.",
     "page_post_missing": "Konten tidak memiliki ID Page Post asli dari published_posts pada hasil audit. Reel tanpa Page Post terhubung tidak didukung; ID media/Reel tidak dipakai sebagai pengganti.",
