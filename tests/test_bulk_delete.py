@@ -30,6 +30,85 @@ def post(n, page='11', **changes):
 
 
 class BulkDelete(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_standalone_and_merged_reel_retains_proven_post_lock(self):
+        standalone=post(2,key='video_reels:987',object_id='987',sources=[{'source':'video_reels','object_id':'987'}],permalink=None)
+        merged=post(1,sources=[{'source':'published_posts','object_id':'11_1'},
+                             {'source':'video_reels','object_id':'987','post_id':'11_1'}])
+        self.seed([standalone,merged])
+        data=(await self.prepare(selections=[{'page_id':'11','keys':[standalone['key'],merged['key']]}])).json()
+        self.assertEqual(data['supported'],1)
+        self.assertEqual(data['duplicates'],1)
+        self.assertEqual(data['items'][0]['linked_post_id'],'11_1')
+        self.assertEqual(data['items'][0]['operation_scope'],'reel_video')
+        self.assertEqual(self.calls,[])
+
+    async def test_merged_candidate_uses_video_once_and_rejects_story_ambiguity(self):
+        merged=post(1, kind='Reel', sources=[{'source':'published_posts','object_id':'11_1'},
+            {'source':'video_reels','object_id':'987','post_id':'11_1'}])
+        story=post(2,kind='Story')
+        ambiguous=post(3,sources=[{'source':'video_reels','object_id':'988'},
+                                  {'source':'video_reels','object_id':'989'}])
+        self.allowed.add('987')
+        self.seed([merged,story,ambiguous])
+        preview=(await self.prepare(3)).json()
+        self.assertEqual(preview['supported'],1)
+        self.assertEqual(preview['unsupported'],2)
+        self.assertEqual(preview['items'][0]['target_id'],'987')
+        result=await self.finished((await self.confirm(preview['confirmation_id'])).json()['job_id'])
+        self.assertEqual(result['counts']['succeeded'],1)
+        self.assertEqual([r.url.path for r,_ in self.calls],['/v26.0/987'])
+        ledger=''.join(path.read_text() for path in Path(self.temp.name).glob('*.json'))
+        self.assertIn('video_node',ledger)
+        self.assertNotIn(TOKEN,ledger)
+
+    async def test_mixed_reel_failure_uncertain_and_success_without_retry(self):
+        items=[post(1)]
+        for n in ('987','988','989'):
+            self.allowed.add(n)
+            items.append(post(2,key='video_reels:'+n,object_id=n,kind='Reel',
+                sources=[{'source':'video_reels','object_id':n}],permalink=None))
+        self.seed(items)
+        self.responses['988']=httpx.Response(403,json={'error':{'code':200,'message':'Object denied'}})
+        self.responses['989']=httpx.ReadTimeout('dummy')
+        selections=[{'page_id':'11','keys':[item['key'] for item in items]}]
+        result=await self.finished(await self.start(selections=selections))
+        self.assertEqual(result['counts']['succeeded'],2)
+        self.assertEqual(result['counts']['failed'],1)
+        self.assertEqual(result['counts']['uncertain'],1)
+        self.assertEqual(result['counts']['blocked'],0)
+        self.assertEqual(len(self.calls),4)
+        self.assertEqual({item['key'] for item in self.store.audits.get(self.sid,'11')['items']},
+                         {'video_reels:988','video_reels:989'})
+
+    async def test_mixed_queue_original_ids_and_reel_transport(self):
+        reel = post(2, key='video_reels:987', object_id='987', kind='Reel',
+                    sources=[{'source':'video_reels','object_id':'987'}], permalink='')
+        self.allowed.add('987')
+        self.seed([post(1), reel])
+        prepared = await self.prepare(selections=[{'page_id':'11','keys':[post(1)['key'],reel['key']]}])
+        self.assertEqual(prepared.json()['supported'],2)
+        self.assertEqual(self.calls,[])
+        with patch.object(self.app.state.graph, 'delete_reel_once', wraps=self.app.state.graph.delete_reel_once) as send:
+            result = await self.finished((await self.confirm(prepared.json()['confirmation_id'])).json()['job_id'])
+            self.assertEqual(send.call_count,1)
+        self.assertEqual(result['counts']['succeeded'],2)
+        self.assertEqual({r.url.path for r,_ in self.calls},{'/v26.0/11_1','/v26.0/987'})
+
+    async def test_linked_post_and_reel_choose_one_media_operation(self):
+        reel = post(2, key='video_reels:987', object_id='987', kind='Reel',
+                    sources=[{'source':'video_reels','object_id':'987','post_id':'11_1'}], permalink=None)
+        self.allowed.add('987')
+        self.seed([post(1), reel])
+        prepared = await self.prepare(selections=[{'page_id':'11','keys':[post(1)['key'],reel['key']]}])
+        data=prepared.json()
+        self.assertEqual(data['supported'],1)
+        self.assertEqual(data['duplicates'],1)
+        self.assertEqual(data['items'][0]['operation_scope'],'reel_video')
+        self.assertEqual(data['items'][0]['permalink'],'https://www.facebook.com/reel/987')
+        result=await self.finished((await self.confirm(data['confirmation_id'])).json()['job_id'])
+        self.assertEqual(result['counts']['succeeded'],1)
+        self.assertEqual([r.url.path for r,_ in self.calls],['/v26.0/987'])
+
     async def test_message_sanitization_bounds_controls_and_unknown_bearer_header(self):
         from graph_api import sanitized_meta_message
         value=sanitized_meta_message('Authorization: Bearer UNTRACKED_EXAMPLE\n\x00'+TOKEN,{TOKEN})
@@ -315,9 +394,10 @@ class BulkDelete(unittest.IsolatedAsyncioTestCase):
         data = prepared.json()
         self.assertEqual(data['supported'], 1)
         self.assertEqual(data['unsupported'], 3)
-        self.assertEqual(data['items'][0]['target_id'], '11_1')
-        self.assertEqual(data['items'][0]['page_name'], 'First Page')
-        self.assertTrue(all(item['reason'] and item['message'] for item in data['items'][1:]))
+        supported=next(item for item in data['items'] if item['supported'])
+        self.assertEqual(supported['target_id'], '11_1')
+        self.assertEqual(supported['page_name'], 'First Page')
+        self.assertTrue(all(item['reason'] and item['message'] for item in data['items'] if not item['supported']))
         self.assertEqual(self.calls, [])
         self.store.audits.entries[self.sid].expires_at = time.monotonic()-1
         confirmed = await self.confirm(data['confirmation_id'])

@@ -125,7 +125,7 @@
     const deleteHint = !connected ? "Hubungkan Facebook." : deleting || postsLoading || dryLoading || busy ? "Tunggu proses selesai." : Date.now() < cooldownUntil ? "Tunggu jeda API." : !selected.size ? "Pilih konten dahulu." : "";
     bulkButton.title = bulkButton.disabled ? deleteHint : "";
     deleteButton.title = deleteButton.disabled ? deleteHint || "Pilih tepat satu Page Post." : "";
-    deleteReelButton.title = deleteReelButton.disabled ? deleteHint || "Pilih tepat satu konten; backend memeriksa ID video Reel asli." : "Uji eksperimental satu Reel; bulk Reel tetap nonaktif.";
+    deleteReelButton.title = deleteReelButton.disabled ? deleteHint || "Pilih tepat satu konten; backend memeriksa ID video Reel asli." : "Periksa satu Reel melalui alat diagnosis.";
     maxPosts.disabled = postsLoading || busy;
     loadButton.textContent = postsLoading ? "Sedang memuat…" : "Load Posts";
     loadStatus.setAttribute("aria-busy", String(postsLoading));
@@ -366,7 +366,7 @@
     const errorSource = {published_posts: "Postingan publik", video_reels: "Reels", stories: "Pemeriksaan Story"}[data.error?.source];
     const counts = Number.isInteger(data.request_count) ? ` Diterima ${data.scanned} item; ${data.request_count} request termasuk retry. ${data.dated_count} bertanggal; ${data.undated_count} tanpa tanggal.` : "";
     loadStatus.textContent = `Ditemukan ${data.found} kandidat unik; ditampilkan ${data.displayed}.${counts} ${stateText}${data.error ? ` ${errorSource ? `${errorSource}: ` : ""}${data.error.message}` : ""}`;
-    auditWarning.textContent = "Daftar mengikuti konten yang tersedia melalui API. Story teridentifikasi tidak didukung. Bulk Reel tetap nonaktif; uji satu Reel eksperimental diperiksa backend melalui ID video asli.";
+    auditWarning.textContent = "Story teridentifikasi ditolak. Periksa setiap target melalui link sebelum konfirmasi penghapusan.";
     loadProgress.setAttribute("value", String(Math.min(100, data.displayed / (data.limit || 1) * 100)));
     renderAuditPage();
   }
@@ -616,7 +616,7 @@
       deletion = Object.freeze({...data, operationScope, target:Object.freeze({...data.target})});
       deleteTitle.textContent = `Konfirmasi ${operationScope === "reel_video" ? "Uji Hapus" : "Hapus"} 1 ${mode.label}`;
       deleteWarning.textContent = operationScope === "reel_video"
-        ? "Eksperimental: satu penghapusan nyata dengan ID video Reel asli dari hasil Load Posts. Kontrak penghapusan Reel belum terverifikasi dengan Meta. Penghapusan tidak dapat dibatalkan. Bulk Reel tetap nonaktif."
+        ? "Satu penghapusan nyata dengan ID video Reel asli dari hasil Load Posts. Keberhasilan target sebelumnya tidak menjamin semua Reel dapat dihapus. Penghapusan tidak dapat dibatalkan."
         : "Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.";
       deleteHelp.textContent = operationScope === "reel_video"
         ? "Buka link Facebook dan pastikan ID video asli serta Page cocok dengan Reel yang ingin dihapus. Periksa bahwa target benar-benar Reel, bukan Story. Tidak ada retry otomatis atau percobaan ID alternatif."
@@ -643,7 +643,7 @@
       link.rel = "noopener noreferrer";
       deleteDetails.appendChild(link);
       const scope = document.createElement("p");
-      scope.textContent = operationScope === "reel_video" ? "Target hanya satu node video Reel asli; bulk Reel tetap nonaktif." : "Operasi menargetkan Page Post, bukan jaminan menghapus objek foto/video/Reel secara terpisah.";
+      scope.textContent = operationScope === "reel_video" ? "Target hanya satu objek video Reel asli." : "Operasi menargetkan Page Post, bukan jaminan menghapus objek foto/video/Reel secara terpisah.";
       deleteDetails.appendChild(scope);
       deleteDialog.showModal();
       deleteStatus.textContent = "Menunggu pemeriksaan manual dan Konfirmasi Hapus. Belum ada DELETE dikirim.";
@@ -747,7 +747,7 @@
   }
   function bulkTarget(parent, item) {
     const details = item.details || item;
-    bulkLine(parent, `Fanpage: ${details.page_name || item.page_id || ""}; key: ${item.key}; target Page Post: ${details.target_id || item.delete_target || "tidak tersedia"}; jenis: ${details.kind || ""}; teks: ${details.text || "Tanpa teks"}.`);
+    bulkLine(parent, `Fanpage: ${details.page_name || item.page_id || ""}; target ${details.operation_scope === "reel_video" ? "video/Reel" : "Page Post"}: ${details.target_id || item.delete_target || "tidak tersedia"}; jenis: ${details.kind || ""}; teks: ${details.text || "Tanpa teks"}.`);
     const url = safeAuditURL(details.permalink);
     if (url) {
       const link = document.createElement("a"); link.textContent = "Periksa target di Facebook";
@@ -774,7 +774,7 @@
       if (item.status === "succeeded" && loadedAudit?.page_id === item.page_id) {
         loadedAudit.items = loadedAudit.items.filter(target => {
           const matches = target.key === item.key || (target.sources || []).some(source =>
-            (source.source === "published_posts" && source.object_id === item.delete_target) ||
+            (source.source === "published_posts" && source.object_id === (item.details?.operation_scope === "reel_video" ? item.details.linked_post_id : item.delete_target)) ||
             (source.source === "video_reels" && (item.details?.related_video_ids || []).includes(source.object_id)));
           if (matches) selected.delete(target.key);
           return !matches;

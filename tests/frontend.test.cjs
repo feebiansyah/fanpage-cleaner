@@ -748,6 +748,22 @@ const bulkPreview = {confirmation_id:'bulk-cid',expires_in_seconds:60,selected:2
     {supported:false,page_id:'11',page_name:'Original Page',key:'published_posts:11_1',kind:'Story',reason:'identified_story',message:'Story ditolak'}]};
 const bulkJob = {job_id:'bulk-job',terminal:true,state:'completed',selected:2,total:1,duplicates:0,completed:1,succeeded:1,pages:[{page_id:'11',name:'Original Page'}],
   counts:{queued:0,processing:0,succeeded:1,failed:0,uncertain:0,blocked:0,cancelled:0},items:[{page_id:'11',key:'published_posts:11_0',delete_target:'11_0',status:'succeeded',reasons:['success_boolean_true'],details:bulkPreview.items[0],diagnostic:{http_status:200,raw_body:'secret-token'}}]};
+test('mixed bulk preview identifies Reel media and success removes its linked Post alias',async()=>{
+  const loaded=audit(3);
+  loaded.items[0].sources=[{source:'published_posts',object_id:'11_0'}];
+  loaded.items[1].sources=[{source:'video_reels',object_id:'99',post_id:'11_0'}];
+  const detail={...bulkPreview.items[0],key:loaded.items[1].key,operation_scope:'reel_video',target_id:'99',kind:'Reel',related_video_ids:['99'],linked_post_id:'11_0',permalink:'https://www.facebook.com/reel/99'};
+  const preview={...bulkPreview,supported:1,unsupported:0,duplicates:1,items:[detail]};
+  const result={...bulkJob,items:[{...bulkJob.items[0],key:detail.key,delete_target:'99',details:detail}]};
+  const {elements,requests}=setup([connected,loaded,preview,result]);
+  await tick();await elements['load-posts'].events.click();choose(elements);
+  await elements['delete-selected'].events.click();
+  assert.match(JSON.stringify(elements['bulk-details'].children),/target video\/Reel: 99/);
+  elements['bulk-manual-check'].checked=true;await elements['bulk-confirm'].events.click();
+  assert.equal(elements['content-list'].children.length,1);
+  assert.equal(requests.filter(r=>r.path==='/api/bulk-delete/confirm').length,1);
+  assert.match(elements['bulk-status'].textContent,/Berhasil 1/);
+});
 test('bulk success invalidates aliases only through original published Post identity',async()=>{
   const loaded=audit(3);
   loaded.items[1].sources=[{source:'published_posts',object_id:'11_0'}, {source:'video_reels',object_id:'99',post_id:'11_0'}];
@@ -862,7 +878,7 @@ test('experimental Reel preview uses its own route and blocks wrong scope', asyn
   await elements['delete-one-reel'].events.click();
   assert.equal(requests[2].path,'/api/reels/delete/prepare');
   assert.equal(elements['delete-dialog'].open,true);
-  assert.match(elements['delete-warning'].textContent,/Eksperimental/);
+  assert.match(elements['delete-warning'].textContent,/tidak menjamin semua Reel/);
   assert.match(elements['delete-details'].children.map(x=>x.textContent).join(' '),/ID video Reel asli: 900/);
   assert.equal(elements['delete-details'].children.find(x=>x.tag==='img').src,'https://scontent.fbcdn.net/reel.jpg');
   const wrong=setup([connected,onePostAudit(),preparedPost]);

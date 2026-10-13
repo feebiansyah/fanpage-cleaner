@@ -63,7 +63,7 @@ class Checkpoints:
                 raise ValueError('invalid proposed target')
             if not re.fullmatch('(published_posts|video_reels):[0-9]{1,40}(?:_[0-9]{1,40})?',row['key']) or not re.fullmatch('(post|video):[0-9]{1,40}(?:_[0-9]{1,40})?',row['canonical']):
                 raise ValueError('invalid canonical')
-            if row['operation'] not in {'post_node','unverified'} or type(row['eligible']) is not bool or type(row['attempts']) is not int or not 0<=row['attempts']<=3:
+            if row['operation'] not in {'post_node','video_node','unverified'} or type(row['eligible']) is not bool or type(row['attempts']) is not int or not 0<=row['attempts']<=3:
                 raise ValueError('invalid target policy')
             if not isinstance(row['reasons'],list) or len(row['reasons'])>12 or any(not isinstance(r,str) or not re.fullmatch('[a-z_]{1,80}',r) for r in row['reasons']):
                 raise ValueError('invalid reason')

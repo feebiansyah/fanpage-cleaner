@@ -1,10 +1,10 @@
-"""Short-lived confirmations for concrete supported Page Post subsets. Uses existing queue."""
+"""Short-lived mixed Post/Reel confirmations using the existing queue."""
 import copy
 import secrets
 import time
 from dataclasses import dataclass,field
 
-from bulk_targets import Target
+from bulk_targets import Target, identity_locks
 from content import identifier
 from errors import AppError, MESSAGES
 from single_delete import CONFIRMATION_TTL, MAX_CONFIRMATIONS, MAX_PER_SESSION
@@ -51,6 +51,21 @@ class BulkDelete:
         if session is None: raise AppError('session_expired',401)
         if len(self.confirmations)>=MAX_CONFIRMATIONS or sum(c.session_id==sid and c.job_id is None for c in self.confirmations.values())>=MAX_PER_SESSION:
             raise AppError('delete_capacity',503)
+        # Resolve media candidates first across all groups: proven Post aliases
+        # must not win simply because their checkbox appeared earlier.
+        ordered=[]
+        for group in groups:
+            _,page=self.store.require_page(browser_id,sid,group['page_id'])
+            audit=self.store.audits.get(sid,page.id)
+            if audit is None: raise AppError('audit_expired',409)
+            index={i['key']:i for i in audit['items']}
+            for key in group['keys']:
+                if key not in index: raise AppError('invalid_selection')
+                sources=index[key].get('sources')
+                has_reel=isinstance(sources,list) and any(isinstance(s,dict) and s.get('source')=='video_reels' for s in sources)
+                linked_reel=has_reel and any(isinstance(s,dict) and s.get('source')=='video_reels' and s.get('post_id') for s in sources)
+                ordered.append(((not has_reel,not linked_reel),{'page_id':page.id,'keys':[key]}))
+        groups=[group for _,group in sorted(ordered,key=lambda pair:pair[0])]
         items,targets,pages,seen=[],[],{},set()
         duplicates=0
         selected=set()
@@ -68,21 +83,24 @@ class BulkDelete:
                 selected.add((page.id,key))
                 item=index[key]
                 try:
-                    _,_,detail,_=self.single.resolve(browser_id,sid,page.id,key)
+                    sources=item.get('sources')
+                    operation_scope='reel_video' if isinstance(sources,list) and any(isinstance(s,dict) and s.get('source')=='video_reels' for s in sources) else 'page_post'
+                    _,_,detail,_=self.single.resolve(browser_id,sid,page.id,key,operation_scope)
                 except AppError as error:
                     items.append({'supported':False,'page_id':page.id,'page_name':name,'key':key,
                         'target_id':None,'kind':item.get('kind'),'text':item.get('text',''),
                         'permalink':item.get('permalink'),'reason':error.code,'message':MESSAGES[error.code]})
                     continue
-                canonical='post:'+detail['target_id']
-                if canonical in seen:
+                canonical=('video:' if operation_scope=='reel_video' else 'post:')+detail['target_id']
+                locks=identity_locks(canonical,detail)
+                if locks.intersection(seen):
                     duplicates+=1
                     continue
-                seen.add(canonical)
+                seen.update(locks)
                 pages[page.id]=name
-                target=Target(page.id,key,item['object_id'],canonical,detail['target_id'],'post_node',True,[],details=copy.deepcopy(detail),scope=self.store.token_key(page.access_token))
+                target=Target(page.id,key,item['object_id'],canonical,detail['target_id'],'video_node' if operation_scope=='reel_video' else 'post_node',True,[],details=copy.deepcopy(detail),scope=self.store.token_key(page.access_token))
                 targets.append(target)
-                items.append({**detail,'supported':True,'reason':None,'message':'Target Page Post; objek media terpisah tidak dijamin ikut dihapus.'})
+                items.append({**detail,'supported':True,'reason':None,'message':'Menargetkan objek video/Reel asli.' if operation_scope=='reel_video' else 'Menargetkan Page Post; media terpisah tidak dijamin ikut dihapus.'})
         cid=secrets.token_urlsafe(32)
         expires=min(session.expires_at,time.monotonic()+CONFIRMATION_TTL)
         unsupported=sum(not i['supported'] for i in items)
@@ -90,7 +108,7 @@ class BulkDelete:
         return {'confirmation_id':cid,'expires_in_seconds':max(0,int(expires-time.monotonic())),
             'selected':total,'supported':len(targets),'unsupported':sum(not i['supported'] for i in items),
             'duplicates':duplicates,'items':items,'max_targets':self.store.settings.bulk_delete_max_targets,
-            'story_automatically_verified':False,'message':'Konfirmasi hanya subset didukung yang ditampilkan. Periksa daftar/permalink secara manual, bukan Story. Penghapusan Page Post tidak dapat dibatalkan.'}
+            'story_automatically_verified':False,'message':'Konfirmasi hanya subset didukung yang ditampilkan. Periksa setiap target melalui link, bukan Story. Penghapusan Post/Reel tidak dapat dibatalkan.'}
 
     def confirm(self,browser_id,sid,payload):
         if (not isinstance(payload,dict) or set(payload)!={'confirmation_id','manual_targets_confirmed'}

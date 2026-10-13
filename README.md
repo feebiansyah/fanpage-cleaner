@@ -1,8 +1,20 @@
 # Fanpage Cleaner
 
-Aplikasi FastAPI + Jinja2 satu halaman berbahasa Indonesia. Koneksi menerima **Facebook user access token** dan daftar Fanpage lewat `GET /me/accounts`. Hapus satu maupun beberapa Page Post tersedia melalui konfirmasi manual. **Percobaan SATU Reel** tersedia secara terpisah; bulk Reel, OAuth, database, dan perpanjangan token tidak tersedia.
+Aplikasi FastAPI + Jinja2 satu halaman berbahasa Indonesia. Koneksi menerima **Facebook user access token** dan daftar Fanpage lewat `GET /me/accounts`. **Hapus Terpilih** menerima campuran Page Post dan Reel melalui satu konfirmasi manual dan antrean bersama. OAuth, database, dan perpanjangan token tidak tersedia.
 
-Penelusuran dari baseline `a59d35c` dicatat pada [bukti dan status percobaan Reel](docs/reel-delete-investigation.md). Kode lama yang diberikan pengguna dipakai sebagai referensi pola ID, bukan bukti kontrak Meta. Pengguna mengizinkan jalur percobaan satu target; dukungan/izin/kontrak untuk seluruh Reel tetap belum terbukti.
+## Penghapusan campuran: coba 5 konten
+
+Load Posts limit 20 atau 100, pilih hingga 5 Post/foto/video/Reel yang memang ingin dihapus, lalu **Hapus Terpilih**. Preview mencantumkan Fanpage, jumlah didukung/ditolak/duplikat, jenis, ID target asli, teks dan link. Periksa seluruh target didukung melalui link dan pastikan **bukan Story**, lalu konfirmasi sekali. Maksimal **20 pilihan**, **2 worker global**, pacing awal **1 dispatch/detik** tetap kebijakan lokal, bukan kuota Meta.
+
+Backend memilih `page_post` untuk provenance `published_posts`, dan `reel_video` untuk provenance `video_reels` yang valid, termasuk gabungan Post/Reel. Gabungan menargetkan satu ID video asli; alias Post/Reel yang diketahui dideduplikasi dan memakai lock bersama single delete. Tidak ada ID buatan/fallback. Link Reel tanpa permalink upstream dibuat sebagai `https://www.facebook.com/reel/{ID_ASLI}` untuk pemeriksaan saja. Target Story teridentifikasi/ambigu ditolak tanpa DELETE.
+
+Snapshot backend terikat sesi dengan konfirmasi acak TTL 60 detik dan konsumsi idempotent. Setelah enqueue snapshot tidak bergantung pada cache audit; sesi dan token Page diperiksa sebelum dispatch. Setiap DELETE dikirim sekali, tanpa retry otomatis/GET rutin. Sukses hanya HTTP 2xx, JSON object dengan `success` boolean true dan tanpa field error. Timeout/network yang mungkin sudah terkirim menjadi uncertain; gagal/uncertain tetap dicatat. Stop menghentikan dispatch baru dan menunggu respons yang sudah terkirim. Penolakan generik per target tidak memblokir seluruh Page; circuit breaker, token invalid, cooldown dan Retry-After tetap berlaku.
+
+Pengguna melaporkan satu Reel memberi success=true dan hilang di aplikasi Facebook HP. Itu bukti target yang diuji, **bukan kontrak universal semua Reel** atau verifikasi otomatis bebas Story. Antrean campuran di sini diuji dengan mock saja. Hanya succeeded membersihkan audit/alias; kegagalan cleanup dicatat terpisah tanpa mengubah sukses Meta. Checkpoint nonrahasia tetap atomik dan dikarantina setelah restart; processing/uncertain tidak dijalankan ulang otomatis. Nama mode internal `delete_page_posts` dipertahankan untuk kompatibilitas checkpoint, dengan operasi tiap target `post_node`/`video_node`.
+
+Alat single delete dan Dry Run tersedia untuk diagnosis; alur utama adalah Hapus Terpilih. Bagian di bawah menyimpan rincian single Post/Reel dan riwayat batas verifikasi resmi.
+
+Penelusuran awal dari baseline `a59d35c` dicatat pada [bukti dan status percobaan Reel](docs/reel-delete-investigation.md). Kode lama yang diberikan pengguna dipakai sebagai referensi pola ID, bukan bukti kontrak Meta. Setelah uji satu Reel berhasil menurut pengguna, pengguna mengizinkan antrean campuran terbatas; dukungan/izin/kontrak untuk seluruh Reel tetap belum terbukti.
 
 ## Mencoba satu Reel melalui web
 
@@ -16,11 +28,11 @@ Backend menerima `{page_id, keys:[key]}` pada `POST /api/reels/delete/prepare`, 
 
 Confirmation ID acak, TTL 60 detik dan single-use menggunakan manager yang sama dengan single Post, terikat snapshot/sesi dan scope `reel_video`. Konfirmasi Post tidak bisa dieksekusi lewat endpoint Reel maupun sebaliknya. DELETE **satu kali** ke `https://graph.facebook.com/v26.0/{ID_VIDEO_ASLI}` memakai Page token backend pada **header Authorization**, AsyncClient, governor, pacing, cooldown dan circuit breaker yang sama. Tidak ada GET rutin sebelum/sesudah delete, token di URL/frontend, retry DELETE atau fallback ID/waktu updated_time.
 
-Lock mencakup ID video asli dan relasi Post yang benar-benar diketahui. Bulk Post ikut menahan alias media yang terdapat pada provenance-nya. Alias yang disupresi setelah sukses mencegah operasi ganda; ini bukan bukti objek terkait juga telah dihapus oleh Meta. Kapasitas tombstone dicadangkan sebelum request. Bulk tetap memakai resolver **Page Post**; Reel mandiri tidak dibuka pada antrean bulk. Maksimal 20 pilihan bulk, dua worker global dan pacing awal satu dispatch/detik tetap dipertahankan.
+Lock mencakup ID video asli dan relasi Post yang benar-benar diketahui. Alias yang disupresi setelah sukses mencegah operasi ganda; ini bukan bukti objek terkait juga telah dihapus oleh Meta. Kapasitas tombstone dicadangkan sebelum request. Bulk memakai resolver Post/Reel yang sama dengan single delete. Maksimal 20 pilihan bulk, dua worker global dan pacing awal satu dispatch/detik tetap dipertahankan.
 
 **Baca Hasil Hapus Terakhir** memakai pembacaan lokal sesi yang sama; hasil menyebut `delete_one_reel_trial` dan ID video. Diagnostik HTTP/code/subcode/durasi serta pesan Meta yang sudah disanitasi tetap tersedia dalam detail. Membaca diagnosis tidak memanggil Meta atau mengulang penghapusan. Setelah restart hasil memori tidak tersedia; tidak ada pemulihan/retry otomatis percobaan Reel.
 
-## Bulk Page Post terbatas: coba 5 target
+## Rincian konfirmasi antrean: coba 5 target
 
 1. Jalankan **satu proses Uvicorn**, hubungkan token, pilih Fanpage, lalu Load Posts limit 20 atau 100. Pilih **5 konten** dan tekan **Hapus Terpilih**.
 2. Preview backend menampilkan jumlah didukung/tidak didukung, duplikat, nama Fanpage, ID Post asli, teks dan link tiap target, serta alasan penolakan. Buka link seluruh subset didukung dan periksa bahwa target memang Post yang dimaksud, bukan Story. Target tidak didukung tetap ditampilkan dan tidak masuk antrean.
@@ -30,7 +42,7 @@ Lock mencakup ID video asli dan relasi Post yang benar-benar diketahui. Bulk Pos
 
 Batas sementara `BULK_DELETE_MAX_TARGETS=20` (konfigurasi integer 1–20) berlaku pada jumlah pilihan, termasuk duplikat/tidak didukung. Ini kebijakan uji lokal, bukan kuota Meta. Default **2 worker GLOBAL** dan pacing **1 dispatch/detik** melalui governor yang sama dengan GET. Antrean, round robin antar Page, canonical lock single/bulk, concurrency, cooldown dan Retry-After menggunakan komponen yang sudah ada. Target berbeda di Page sama boleh paralel. Tidak ada batch API, GET rutin sebelum/sesudah DELETE, atau retry otomatis DELETE.
 
-Validasi identitas memakai fungsi single delete yang sama: tepat satu ID asli `published_posts`; provenance Reel harus berelasi persis dan tidak ambigu. Foto/link/video memakai ID **Page Post**, bukan ID media. Reel tanpa provenance Post, Story teridentifikasi, identitas ambigu, audit kedaluwarsa saat menyiapkan preview, atau token tidak tersedia ditolak. Konfirmasi manual **bukan verifikasi otomatis pengecualian Story**; cakupan seluruh sumber belum terbukti. `safe_for_delete` hasil audit tetap false. Bulk dibuka hanya untuk subset konkret yang dikonfirmasi pengguna.
+Validasi identitas memakai fungsi single delete yang sama: tepat satu ID asli `published_posts` untuk Post, atau satu ID numerik asli `video_reels` untuk Reel. Bila kedua provenance hadir, relasi Post harus cocok persis dan tidak ambigu; operasi memilih video/Reel sekali saja. Foto/link/video tanpa provenance Reel memakai ID **Page Post**, bukan ID media lampiran. Story teridentifikasi, identitas ambigu, audit kedaluwarsa saat menyiapkan preview, atau token tidak tersedia ditolak. Konfirmasi manual **bukan verifikasi otomatis pengecualian Story**; cakupan seluruh sumber belum terbukti. `safe_for_delete` hasil audit tetap false. Bulk dibuka hanya untuk subset konkret yang dikonfirmasi pengguna.
 
 Konfirmasi acak terikat sesi/snapshot, TTL **60 detik**, single-use. Replay konfirmasi yang sudah diterima hanya mengembalikan job yang sama selama job/sesi masih ada. Job menyimpan snapshot sendiri sehingga expiry cache audit tidak membatalkan target yang telah dikonfirmasi. Sesi tetap 20 menit tanpa perpanjangan; validitas sesi/token diperiksa lagi tepat sebelum setiap pengiriman. Disconnect/expiry menghentikan dispatch baru dan mempertahankan catatan target yang belum dikirim tanpa token.
 
@@ -46,7 +58,7 @@ UI utama menampilkan **Proses selesai** dengan berhasil, gagal, belum pasti, dih
 
 ### Status Video/Reel dan bukti yang masih kurang
 
-Jalur **bulk yang didukung tetap Page Post asli**, termasuk Post foto/link/video dan kandidat Reel yang mempunyai relasi Post valid. Operasi Post tidak menjamin penghapusan objek video/Reel terpisah. Reel tanpa provenance Page Post tetap ditolak pada bulk; ID video asli hanya dapat dicoba melalui tombol/endpoint **satu Reel eksperimental** di atas, tidak dijadikan ID gabungan.
+Jalur bulk menerima **Post asli atau video/Reel asli** sesuai provenance. Operasi Post tidak menjamin penghapusan objek video/Reel terpisah. Reel tidak harus mempunyai Post terhubung, tetapi relasi yang ada wajib tidak ambigu. Uji nyata satu Reel dari pengguna menjadi dasar uji kecil campuran, bukan bukti seluruh Reel/API/izin berlaku universal.
 
 SDK resmi [Page](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/page.py) mempunyai GET `video_reels` dengan model AdVideo; [AdVideo](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/advideo.py) mempunyai method DELETE node dan field `created_time`. Ini bukti representasi SDK, **bukan bukti bahwa seluruh Reel bisa dihapus**, izin/token yang diperlukan, kontrak sukses, atau bahwa listing `video_reels` mengembalikan field tersebut.
 
@@ -58,9 +70,9 @@ Checkpoint memakai folder `runtime/dry-run/`, penulisan atomik/schema versi 1 ya
 
 Kapasitas antrean yang sudah ada tetap 100 pekerjaan/50000 target dan budget 128 MiB; reservasi konservatif target real 4096 byte (dry run 2048 byte). Pekerjaan dibatasi 1200 detik dan sesi pemilik, termasuk pekerjaan selesai yang masih disimpan. Slot tombstone sukses turut dicadangkan untuk operasi aktif agar cleanup tidak melampaui kapasitas audit. Metadata token hanya diambil dari sesi sebelum pengiriman; tidak disalin ke job/checkpoint.
 
-Endpoint lokal: `POST /api/bulk-delete/prepare`, `POST /api/bulk-delete/confirm`, `GET /api/bulk-delete/jobs/active`, `GET /api/bulk-delete/jobs/{id}`, `POST /api/bulk-delete/jobs/{id}/stop`. Input prepare hanya key audit per Page; confirm hanya confirmation ID dan konfirmasi manual. Semua mempertahankan origin, ownership dan no-store. Polling membaca memori saja. Bulk reuse `DELETE /v26.0/{page_post_id}` dan kontrak sukses pada sumber resmi yang dijelaskan di bawah; tidak memperluas dukungan delete media/Reel.
+Endpoint lokal: `POST /api/bulk-delete/prepare`, `POST /api/bulk-delete/confirm`, `GET /api/bulk-delete/jobs/active`, `GET /api/bulk-delete/jobs/{id}`, `POST /api/bulk-delete/jobs/{id}/stop`. Input prepare hanya key audit per Page; confirm hanya confirmation ID dan konfirmasi manual. Semua mempertahankan origin, ownership dan no-store. Polling membaca memori saja. Bulk reuse transport sekali `DELETE /v26.0/{ID_ASLI}` sesuai operasi Post/Reel, tanpa ID fallback.
 
-Verifikasi terbaru: **189 tes backend dan 59 tes frontend lulus**, termasuk 27 tes bulk dan 19 tes percobaan Reel. Tes tambahan mencakup ID/provenance asli, Story, konfirmasi terikat scope, alias lock/supresi dua arah, kapasitas tombstone, parser ketat dan uncertain tanpa retry. Regresi koneksi, Load Posts, search, penolakan per target, circuit breaker, sanitasi, cooldown, checkpoint dan dry run tetap lulus. Sintaks Python/JavaScript serta `git diff --check` lulus. Semuanya mock/token dummy/DOM simulasi; agen tidak menjalankan penghapusan Facebook nyata. Keberhasilan bulk Post nyata berasal dari uji pengguna; jalur satu Reel ini belum diuji Facebook nyata oleh agen.
+Verifikasi integrasi campuran: **195 tes backend dan 60 tes frontend lulus**. Lima tes backend baru membuktikan transport/ID campuran, satu operasi media untuk gabungan dan alias, penolakan Story/ambigu, hasil sukses/gagal/uncertain tanpa retry, dan checkpoint video nonrahasia. Tes UI baru membuktikan preview ID Reel dan pembersihan Post alias setelah sukses. Regresi konfirmasi/klik ganda/isolasi sesi, lock single/bulk, governor/cooldown, circuit breaker, Stop, cleanup, checkpoint/restart, koneksi, Load Posts, search dan dry run tetap lulus. Sintaks Python/JavaScript serta `git diff --check` lulus. Semuanya mock/token dummy/DOM simulasi; agen tidak menjalankan penghapusan Facebook nyata. Uji Facebook nyata Post dan satu Reel berasal dari pengguna, bukan pengujian agen.
 
 ## Status tahap 5
 

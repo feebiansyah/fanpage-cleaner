@@ -1,4 +1,4 @@
-"""Local dry-run executor and pure future outcome design; no HTTP mutation code."""
+"""Dry-run and confirmed one-send Post/Reel executors sharing Graph transport."""
 import asyncio
 import time
 from bulk_targets import suppression_ids
@@ -46,7 +46,7 @@ class PagePostExecutor:
             if reason: raise AppError('bulk_token_blocked' if reason=='token_invalid' else reason if reason in {'permission_circuit_open','permission_circuit_capacity'} else 'bulk_page_blocked',403)
             _,page=q.store.require_page(job.browser_id,job.session_id,target.page_id)
             if not page.access_token: raise AppError('page_token_missing',403)
-            identities={target.delete_target,*target.details.get('related_video_ids',[])}
+            identities=suppression_ids(target.delete_target,target.details)
             if any(q.store.audits.removed_posts.get((target.page_id,node),0)>time.monotonic() for node in identities):
                 raise AppError('bulk_target_deleted',409)
             target.attempts=1
@@ -58,12 +58,16 @@ class PagePostExecutor:
             target.scope=q.store.token_key(page.access_token)
             deadline=min(job.expires_at,session.expires_at,started+q.settings.operation_timeout)
             del page,session
-            result=await self.graph.delete_post_once(target.delete_target,target.scope,deadline,token_at_dispatch,observation)
+            send=self.graph.delete_reel_once if target.details.get('operation_scope')=='reel_video' else self.graph.delete_post_once
+            result=await send(target.delete_target,target.scope,deadline,token_at_dispatch,observation)
             status,reason=result['outcome'],result['reason']
             if result.get('request_started'):
                 q.record_delete_outcome(target,reason)
             if status=='succeeded':
-                warnings=[invalidate_confirmed_post(q.store,target.page_id,node) for node in sorted(suppression_ids(target.delete_target,target.details))]
+                warnings=[]
+                for node in sorted(suppression_ids(target.delete_target,target.details)):
+                    try: warnings.append(invalidate_confirmed_post(q.store,target.page_id,node))
+                    except Exception: warnings.append('cache_cleanup_failed')
                 target.cleanup_warning=next((warning for warning in warnings if warning),None)
                 if target.cleanup_warning: target.reasons.append(target.cleanup_warning)
         except AppError as error:
@@ -79,7 +83,7 @@ class PagePostExecutor:
             result={**observation,'outcome':status,'reason':reason,'internal_code':delete_internal_code(error,observation['phase'])}
         finally:
             if result is not None:
-                target.diagnostic={'operation':'delete_page_post','target_id':target.delete_target,
+                target.diagnostic={'operation':'delete_reel_video' if target.details.get('operation_scope')=='reel_video' else 'delete_page_post','target_id':target.delete_target,
                     'outcome':result['outcome'],'reason':result['reason'],'duration_ms':round((time.monotonic()-started)*1000),
                     **{key:result.get(key,observation.get(key)) for key in ('http_status','error_code','error_subcode',*OBSERVATION_FIELDS)}}
         return Outcome(status,reason,False,result.get('retry_after') or 0)

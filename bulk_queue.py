@@ -269,7 +269,7 @@ class BulkQueue:
                     'succeeded':counts['succeeded'],'manual_targets_confirmed':True,'story_automatically_verified':False,
                     'pages':[{'page_id':pid,'name':name} for pid,name in job.pages.items()],
                     'items':[{**t.public(),'details':dict(t.details),'diagnostic':dict(t.diagnostic),'cleanup_warning':t.cleanup_warning} for t in job.targets],
-                    'stop_reason':job.stop_reason,'message':'Operasi menargetkan Page Post; hasil sukses hanya berdasarkan respons Meta yang ketat.'}
+                    'stop_reason':job.stop_reason,'message':'Operasi menargetkan ID Post atau video/Reel asli sesuai snapshot; sukses mensyaratkan respons Meta yang ketat.'}
         targets=job.targets
         return {'job_id':job.id,'mode':'dry_run','state':job.state,'terminal':job.terminal,
                 'safe_for_delete':False,'selected':len(targets)+job.duplicates,'unique':len(targets),

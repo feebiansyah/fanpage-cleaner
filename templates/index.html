@@ -57,7 +57,7 @@
         <summary>Ringkasan sumber API</summary>
         <div id="source-diagnostics" class="help" aria-live="polite"></div>
       </details>
-      <p id="audit-warning" class="help">Story teridentifikasi tidak didukung. Bulk memakai ID Page Post; percobaan satu Reel tersedia secara terpisah.</p>
+      <p id="audit-warning" class="help">Story teridentifikasi ditolak. Periksa setiap target melalui link sebelum konfirmasi.</p>
       <p id="selected-count" class="help" role="status" aria-live="polite">Terpilih 0 konten.</p>
       <div id="content-list" class="content-list" aria-label="Daftar konten Fanpage">
         <p>Belum ada konten yang dimuat.</p>
@@ -66,15 +66,19 @@
       <div class="actions">
         <button id="delete-selected" class="danger" type="button" disabled>Hapus Terpilih</button>
         <button id="bulk-read" class="secondary" type="button" disabled>Baca Antrean Penghapusan</button>
-        <button id="delete-one" class="danger" type="button" disabled>Hapus 1 Post</button>
-        <button id="delete-one-reel" class="danger" type="button" disabled>Uji Hapus 1 Reel</button>
-        <p class="help">Uji Reel eksperimental memakai ID video asli dari hasil Load Posts; kontrak Meta belum terverifikasi. Bulk Reel tetap nonaktif.</p>
-        <button id="delete-read-last" class="secondary" type="button" disabled>Baca Hasil Hapus Terakhir</button>
         <button id="stop-load" class="secondary" type="button" disabled aria-describedby="load-status">Berhenti</button>
       </div>
-      <p id="delete-status" class="help" role="status" aria-live="polite">Pilih konten, lalu klik Hapus Terpilih atau Hapus 1 Post.</p>
+      <details><summary>Alat diagnosis</summary>
+      <div class="actions">
+        <button id="delete-one" class="danger" type="button" disabled>Hapus 1 Post</button>
+        <button id="delete-one-reel" class="danger" type="button" disabled>Uji Hapus 1 Reel</button>
+        <p class="help">Keberhasilan Reel yang telah diuji tidak menjamin semua Reel dapat dihapus.</p>
+        <button id="delete-read-last" class="secondary" type="button" disabled>Baca Hasil Hapus Terakhir</button>
+      </div>
+      <p id="delete-status" class="help" role="status" aria-live="polite">Belum ada hasil diagnosis penghapusan.</p>
       <details><summary>Detail hasil penghapusan</summary>
       <div id="delete-diagnosis" class="help" role="status" aria-live="polite" aria-label="Diagnosis aman hasil hapus"></div>
+      </details>
       </details>
       <p id="bulk-status" class="help" role="status" aria-live="polite">Antrean penghapusan belum berjalan.</p>
       <div id="bulk-results" class="help"></div>
@@ -114,7 +118,7 @@
     <h2 id="bulk-title">Konfirmasi Hapus Terpilih</h2>
     <div id="bulk-details"></div>
     <p class="notice">Penghapusan tidak dapat dibatalkan. Hanya subset yang didukung di bawah ini akan dikirim.</p>
-    <label class="checkbox-label"><input id="bulk-manual-check" type="checkbox">Saya sudah memeriksa seluruh link dan daftar target yang didukung, memastikan semuanya Page Post yang ingin dihapus dan bukan Story. Pengecualian Story otomatis belum lengkap. Penghapusan Page Post tidak menjamin penghapusan media atau Reel terpisah.</label>
+    <label class="checkbox-label"><input id="bulk-manual-check" type="checkbox">Saya sudah memeriksa seluruh link dan daftar target yang didukung, memastikan semuanya Post atau Reel yang ingin dihapus dan bukan Story. Ini pemeriksaan manual; pengecualian Story otomatis belum lengkap.</label>
     <div class="actions"><button id="bulk-cancel" type="button" class="secondary">Batal</button><button id="bulk-confirm" type="button" class="danger" disabled>Konfirmasi Hapus Terpilih</button></div>
   </dialog>
 </body>

@@ -231,12 +231,14 @@ class SingleReel(ReelFixture, unittest.IsolatedAsyncioTestCase):
             release.set()
             await task
 
-    async def test_standalone_reel_remains_unsupported_in_bulk(self):
+    async def test_standalone_reel_prepares_in_bulk_without_dispatch(self):
         response = await self.client.post('/api/bulk-delete/prepare',headers=HEADERS,
             json={'selections':[{'page_id':'11','keys':[reel()['key']]}]})
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()['supported'], 0)
-        self.assertEqual(response.json()['unsupported'], 1)
+        self.assertEqual(response.json()['supported'], 1)
+        self.assertEqual(response.json()['unsupported'], 0)
+        self.assertEqual(response.json()['items'][0]['target_id'],'987')
+        self.assertEqual(response.json()['items'][0]['operation_scope'],'reel_video')
         self.assertEqual(self.calls, [])
 
     async def test_known_story_and_expired_session_deny_dispatch(self):

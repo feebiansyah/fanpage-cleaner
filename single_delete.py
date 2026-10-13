@@ -152,7 +152,7 @@ class SingleDelete:
         return {'confirmation_id': cid, 'expires_in_seconds': max(0, int(expiry-time.monotonic())),
                 'experimental':operation_scope=='reel_video','contract_verified':operation_scope!='reel_video',
                 'target': target, 'story_automatically_verified': False,
-                'message': 'Percobaan SATU Reel memakai ID video asli; kontrak API Reel belum terverifikasi. Periksa link dan pastikan target benar, bukan Story. Ini penghapusan nyata dan tidak dapat dibatalkan; bulk Reel tidak aktif.' if operation_scope=='reel_video' else 'Periksa permalink: pastikan target adalah Page Post yang ingin dihapus, bukan Facebook Story. Operasi menargetkan Page Post, bukan jaminan menghapus objek foto/video/Reel secara terpisah. Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.'}
+                'message': 'Reel memakai ID video asli. Keberhasilan target yang telah diuji tidak menjamin semua Reel dapat dihapus. Periksa link dan pastikan target benar, bukan Story. Ini penghapusan nyata dan tidak dapat dibatalkan.' if operation_scope=='reel_video' else 'Periksa permalink: pastikan target adalah Page Post yang ingin dihapus, bukan Facebook Story. Operasi menargetkan Page Post, bukan jaminan menghapus objek foto/video/Reel secara terpisah. Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.'}
 
     async def execute(self, graph, browser_id, sid, payload, operation_scope='page_post'):
         if (not isinstance(payload, dict) or set(payload) != {'confirmation_id', 'manual_target_confirmed'}
