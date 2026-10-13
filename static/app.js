@@ -580,6 +580,10 @@
       line.textContent = text;
       deleteDiagnosis.appendChild(line);
     }
+    if (outcome === "failed" && (target.operation_scope || "page_post") === "page_post") {
+      const generation = deleteGeneration, reportGeneration = deleteReportGeneration;
+      addFailureProbe(deleteDiagnosis, {last_result:true}, () => connected && generation === deleteGeneration && reportGeneration === deleteReportGeneration);
+    }
   }
 
   readLastButton.addEventListener("click", async () => {
@@ -745,6 +749,41 @@
   function bulkLine(parent, text) {
     const line = document.createElement("p"); line.textContent = text; parent.appendChild(line);
   }
+  function addFailureProbe(parent, payload, current) {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "secondary"; button.textContent = "Periksa Penyebab Gagal";
+    button.title = "GET saja, maksimal lima request termasuk retry. Tidak mencoba penghapusan ulang.";
+    const result = document.createElement("div"); result.setAttribute("role", "status");
+    let checking = false;
+    button.addEventListener("click", async () => {
+      if (checking || !current()) return;
+      checking = true; button.disabled = true; result.replaceChildren();
+      bulkLine(result, "Memeriksa izin dan metadata melalui GET; tidak mengirim DELETE.");
+      try {
+        const data = await api("/api/delete-diagnosis", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+        if (!current()) return;
+        applyCooldown(data); result.replaceChildren();
+        bulkLine(result, `${data.request_count}/${data.request_budget} request aktual. ${data.message || "GET tidak membuktikan izin DELETE atau keadaan token lama."}`);
+        const labels = {granted:"Diberikan",declined:"Ditolak",expired:"Kedaluwarsa",unknown:"Tidak diketahui"};
+        for (const [permission, state] of Object.entries(data.permissions || {})) bulkLine(result, `${permission}: ${labels[state] || "Tidak diketahui"}.`);
+        bulkLine(result, `Tasks Page: ${Array.isArray(data.tasks) ? data.tasks.join(", ") || "Daftar kosong" : "Tidak diketahui"}.`);
+        bulkLine(result, `Pemilik dari field from: ${data.owner ? `${data.owner.id} (${data.owner.name || "Nama tidak tersedia"}); ${data.owner.matches_page ? "sesuai Page" : "berbeda dari Page"}` : "Tidak diketahui"}. Field from bukan bukti izin atau kepemilikan aplikasi.`);
+        bulkLine(result, `ID Post terbaca: ${data.post_id || "Tidak diketahui"}; status_type: ${data.status_type || "Tidak diketahui"}; application: ${data.application?.id || "Tidak diketahui"}; object_id media: ${data.media_object_id || "Tidak diketahui"}. Application tidak dibandingkan dengan app penerbit token karena informasi itu tidak tersedia.`);
+        bulkLine(result, `ID foto dari relasi API: ${(data.photo_ids || []).join(", ") || "Tidak tersedia"}. ID tidak diambil dari URL atau akhiran Post.`);
+        for (const relation of data.relations || []) bulkLine(result, `Relasi attachment ${relation.type || "Jenis tidak diketahui"}: ${relation.id}.`);
+        const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "Rincian pemeriksaan GET"; details.appendChild(summary);
+        for (const check of data.checks || []) {
+          bulkLine(details, `${check.source}: ${check.status}; ${check.reason || ""}; fields: ${check.requested_fields || ""}${check.truncated ? "; hanya satu halaman, data berikutnya tidak diperiksa" : ""}.`);
+          for (const field of ["http_status","error_code","error_subcode","error_message","error_user_msg","failed_fields","unavailable_fields"])
+            if (check[field] !== undefined && check[field] !== null) bulkLine(details, `${field}: ${Array.isArray(check[field]) ? check[field].join(", ") : check[field]}`);
+        }
+        result.appendChild(details);
+      } catch (error) {
+        if (current()) { result.replaceChildren(); bulkLine(result, error.message || "Diagnosis tidak tersedia. Jangan ulang penghapusan untuk diagnosis."); }
+      } finally { checking = false; if (current()) button.disabled = false; }
+    });
+    parent.appendChild(button); parent.appendChild(result);
+  }
   function bulkTarget(parent, item) {
     const details = item.details || item;
     bulkLine(parent, `Fanpage: ${details.page_name || item.page_id || ""}; target ${details.operation_scope === "reel_video" ? "video/Reel" : "Page Post"}: ${details.target_id || item.delete_target || "tidak tersedia"}; jenis: ${details.kind || ""}; teks: ${details.text || "Tanpa teks"}.`);
@@ -770,6 +809,10 @@
       // Deliberate allowlist: never dump response bodies, headers or tokens.
       for (const key of ["reason","http_status","error_code","error_subcode","duration_ms","content_type","json_parsed","json_type","success_type","has_error_field","phase","response_issue","internal_code","error_message","error_user_msg"])
         if (diag[key] !== undefined && diag[key] !== null) bulkLine(row, `${key}: ${diag[key]}`);
+      if (data.terminal && item.status === "failed" && (item.details?.operation_scope || "page_post") === "page_post") {
+        const generation = bulkGeneration, jobId = data.job_id;
+        addFailureProbe(row, {job_id:jobId,key:item.key}, () => connected && generation === bulkGeneration && bulkJob?.job_id === jobId);
+      }
       bulkResults.appendChild(row);
       if (item.status === "succeeded" && loadedAudit?.page_id === item.page_id) {
         loadedAudit.items = loadedAudit.items.filter(target => {

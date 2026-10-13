@@ -853,6 +853,48 @@ test('completed bulk failures remain visible in neutral summary and safe collaps
   assert.equal(requests.length,2);
 });
 
+test('failed Post read-only probe sends backend job/key and displays safe evidence',async()=>{
+  const failed={...bulkJob,counts:{...bulkJob.counts,succeeded:0,failed:1},items:[{...bulkJob.items[0],status:'failed'}]};
+  const evidence={request_count:5,request_budget:5,permissions:{pages_manage_posts:'granted',pages_read_engagement:'unknown'},
+    tasks:['CREATE_CONTENT'],owner:{id:'11',name:'<script>text</script>',matches_page:true},post_id:'11_0',status_type:'added_photos',
+    application:null,media_object_id:'555',photo_ids:['555'],relations:[{type:'photo',id:'555'}],checks:[{source:'post_media',status:'unavailable',reason:'upstream_error',failed_fields:['application']}],message:'GET sukses bukan izin DELETE.'};
+  const {elements,requests}=setup([connected,{jobs:[],last_job:failed},evidence]);
+  await tick();await elements['bulk-read'].events.click();
+  const row=elements['bulk-results'].children[0];
+  const button=row.children.find(child=>child.tag==='button' && child.textContent==='Periksa Penyebab Gagal');
+  assert.ok(button);
+  await button.events.click();
+  assert.equal(requests.at(-1).path,'/api/delete-diagnosis');
+  assert.deepEqual(JSON.parse(requests.at(-1).options.body),{job_id:'bulk-job',key:'published_posts:11_0'});
+  assert.match(JSON.stringify(row.children),/granted|Diberikan/);
+  assert.match(JSON.stringify(row.children),/555/);
+  assert.equal(row.children.filter(child=>child.tag==='script').length,0);
+  assert.equal(requests.filter(r=>r.path.includes('/confirm') || r.path.includes('/execute')).length,0);
+});
+
+test('read-only failure probe ignores response after disconnect and prevents duplicate clicks',async()=>{
+  let release;
+  const pending=new Promise(resolve=>{release=resolve;});
+  const failed={...bulkJob,items:[{...bulkJob.items[0],status:'failed'}]};
+  const {elements,requests}=setup([connected,{jobs:[],last_job:failed},()=>pending,disconnected]);
+  await tick();await elements['bulk-read'].events.click();
+  const row=elements['bulk-results'].children[0];
+  const button=row.children.find(child=>child.tag==='button');
+  const work=button.events.click();await button.events.click();
+  assert.equal(requests.filter(r=>r.path==='/api/delete-diagnosis').length,1);
+  await elements.disconnect.events.click();
+  release({request_count:5,request_budget:5,message:'old evidence must not appear'});await work;
+  assert.equal(elements['bulk-results'].children.length,0);
+});
+
+test('successful Post or failed Reel has no read-only Post failure action',async()=>{
+  for (const item of [bulkJob.items[0],{...bulkJob.items[0],status:'failed',details:{...bulkJob.items[0].details,operation_scope:'reel_video'}}]) {
+    const {elements}=setup([connected,{jobs:[],last_job:{...bulkJob,items:[item]}}]);
+    await tick();await elements['bulk-read'].events.click();
+    assert.equal(elements['bulk-results'].children[0].children.filter(child=>child.tag==='button').length,0);
+  }
+});
+
 test('single delete safe Meta messages appear only in diagnostic text', async()=>{
   const result={outcome:'failed',reason:'permission_denied',message:'Long technical error',
     diagnostic:{error_message:'<img src=x onerror=alert(1)>',error_user_msg:'Periksa izin'}};

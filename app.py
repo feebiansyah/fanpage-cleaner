@@ -15,6 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from config import Settings
 from errors import AppError
 from graph_api import GraphClient
+from failure_diagnosis import FailureDiagnosis
 from sessions import MemoryStore
 from content import ContentLoader
 from content_jobs import ContentJobs
@@ -386,6 +387,13 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     async def prepare_bulk_delete(request: Request):
         payload=await single_delete_body(request)
         return application.state.bulk_delete.prepare(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload)
+
+    failure_diagnosis=FailureDiagnosis(application.state.store,application.state.bulk_delete,application.state.single_delete)
+
+    @application.post('/api/delete-diagnosis')
+    async def diagnose_failed_delete(request: Request):
+        payload=await single_delete_body(request)
+        return await failure_diagnosis.run(application.state.graph,request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload)
 
     @application.post('/api/bulk-delete/confirm')
     async def confirm_bulk_delete(request: Request):

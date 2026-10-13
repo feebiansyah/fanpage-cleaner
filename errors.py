@@ -1,6 +1,10 @@
 """Error tetap: tidak pernah menyertakan input, exception, atau pesan Meta."""
 
 MESSAGES = {
+    'diagnosis_budget':'Budget diagnosis lima request aktual sudah habis; bagian berikutnya tidak dipanggil.',
+    'diagnosis_busy':'Diagnosis masih berjalan atau kapasitas diagnosis lokal penuh.',
+    'diagnosis_not_failed_post':'Diagnosis ini hanya untuk satu hasil Page Post gagal milik sesi; target sukses/Reel tidak diproses kembali.',
+    'diagnosis_unavailable':'Hasil gagal tidak tersedia pada sesi/proses ini. Setelah restart/reconnect, koneksi baru tidak membuktikan keadaan token lama. Jangan ulang penghapusan untuk diagnosis.',
     'reel_source_missing': 'Pilihan tidak memiliki ID asli dari listing video_reels. Percobaan Reel tidak memakai ID Post atau ID bebas.',
     'reel_identity_ambiguous': 'Identitas Reel/video tidak tunggal atau format ID asli tidak valid. Tidak ada ID alternatif yang dicoba.',
     'permission_circuit_capacity': 'Dispatch dihentikan sementara karena kapasitas catatan penolakan lokal penuh; bukan penolakan izin seluruh Page. Target belum dikirim perlu konfirmasi pekerjaan baru setelah jeda.',

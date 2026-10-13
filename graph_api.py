@@ -337,7 +337,8 @@ class GraphClient:
                 await asyncio.sleep(deadline-time.monotonic())
             raise AppError("timeout", 504) from None
 
-    async def _get(self, token, token_key, endpoint, params, deadline, on_request=None):
+    async def _get(self, token, token_key, endpoint, params, deadline, on_request=None, observation=None):
+        known_before=self.store.known_tokens() | {token} if observation is not None else set()
         for attempt in range(3):  # One initial attempt, at most two retries.
             self.store.check_cooldown(token_key)
             if time.monotonic() >= deadline:
@@ -359,6 +360,18 @@ class GraphClient:
                         payload = None
                 instruction = retry_after(headers.get("retry-after"))
                 error = payload.get("error") if isinstance(payload, dict) else None
+                if observation is not None:
+                    observation.clear()
+                    observation['http_status']=status
+                    if isinstance(error,dict):
+                        tokens=known_before | self.store.known_tokens() | {token}
+                        for key in ('code','error_subcode'):
+                            value=error.get(key)
+                            observation['error_code' if key=='code' else 'error_subcode']=value if type(value) is int and 0<=value<=2147483647 else None
+                        for key in ('message','error_user_msg'):
+                            observation['error_message' if key=='message' else key]=sanitized_meta_message(error.get(key),tokens)
+                    if instruction is not None:
+                        self.store.cooldown(token_key,instruction,global_scope=status==429)
                 code = error.get("code") if isinstance(error, dict) else None
                 code = code if type(code) is int else None
                 if code in {102, 190} or status == 401:
