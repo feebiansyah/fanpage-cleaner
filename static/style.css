@@ -16,7 +16,7 @@ header p { margin: 0; color: #526176; }
 .card { padding: 24px; margin-top: 18px; border: 1px solid #dce3ed; border-radius: 12px; background: #fff; }
 label { display: block; margin-bottom: 8px; font-weight: 600; }
 .input-row { display: flex; align-items: stretch; gap: 12px; }
-input[type="password"], input[type="number"], select { width: 100%; min-width: 0; padding: 11px 12px; border: 1px solid #bac6d6; border-radius: 7px; background: #fff; font: inherit; color: inherit; }
+input[type="password"], input[type="number"], input[type="search"], select { width: 100%; min-width: 0; padding: 11px 12px; border: 1px solid #bac6d6; border-radius: 7px; background: #fff; font: inherit; color: inherit; }
 input[type="number"] { max-width: 200px; }
 .limit-label { margin-top: 18px; }
 .audit-row { display: grid; grid-template-columns: 28px 22px 1fr 2fr; gap: 10px; padding: 18px 4px; border-bottom: 1px solid #dce3ed; text-align: left; overflow-wrap: anywhere; }

@@ -29,6 +29,9 @@
         <p id="page-count" class="help">Belum ada sesi aktif.</p>
         <button id="disconnect" class="secondary" type="button" disabled>Putuskan Koneksi</button>
       </div>
+      <label for="fanpage-search">Cari Fanpage</label>
+      <input id="fanpage-search" type="search" placeholder="Nama atau Page ID" autocomplete="off" aria-describedby="fanpage-search-status">
+      <p id="fanpage-search-status" class="help" role="status" aria-live="polite">Belum ada metadata Fanpage.</p>
       <label for="fanpage">Pilihan Fanpage</label>
       <div class="input-row">
         <select id="fanpage" disabled aria-describedby="availability">
@@ -50,6 +53,10 @@
         </label>
       </div>
       <p id="load-status" class="help" role="status" aria-live="polite">Belum ada konten yang dimuat.</p>
+      <details>
+        <summary>Ringkasan sumber API</summary>
+        <div id="source-diagnostics" class="help" aria-live="polite"></div>
+      </details>
       <p id="audit-warning" class="notice">Audit memakai kandidat yang dapat dibaca lewat API. Belum menjamin N terbaru seluruh Fanpage atau hasil aman dihapus. Urutan publikasi dapat berbeda dari tab Postingan Facebook karena pin atau susunan khusus.</p>
       <p id="selected-count" class="help" role="status" aria-live="polite">Terpilih 0 konten.</p>
       <div id="content-list" class="content-list" aria-label="Daftar konten Fanpage">

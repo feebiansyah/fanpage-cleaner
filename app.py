@@ -153,6 +153,8 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         payload = error.payload()
         if hasattr(error, "cause_code"):
             payload["error"]["cause_code"] = error.cause_code
+        if hasattr(error, "sources"):
+            payload["sources"] = error.sources
         return JSONResponse(payload, status_code=error.status, headers=headers)
 
     @application.get("/", response_class=HTMLResponse)

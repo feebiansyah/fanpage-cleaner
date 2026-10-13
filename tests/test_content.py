@@ -35,7 +35,7 @@ def response(data, edge=None, cursor=None):
     return httpx.Response(200, json=payload)
 
 
-class LoadContract(unittest.IsolatedAsyncioTestCase):
+class LoadFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.calls = []
         self.queues = {"stories": [response([])], "published_posts": [response([post(1)])], "video_reels": [response([])]}
@@ -81,6 +81,8 @@ class LoadContract(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(PAGE_TOKEN, result.text)
         self.assertNotIn(USER_TOKEN, result.text)
 
+
+class LoadContract(LoadFixture):
     async def test_limit_one_and_cache_local(self):
         result = await self.load(1)
         self.assertEqual(result.status_code, 200)
@@ -150,7 +152,8 @@ class LoadContract(unittest.IsolatedAsyncioTestCase):
         result = await self.load()
         self.assertEqual(result.json()["state"], "empty")
         self.assertTrue(result.json()["sources_exhausted"])
-        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(any(request.url.path.endswith("/stories") for request in self.calls))
 
     async def test_next_page_errors_are_partial_not_success(self):
         for fault, cause in [(httpx.Response(403), "permission_denied"), (httpx.Response(429), "rate_limited"),
@@ -259,7 +262,9 @@ class LoadContract(unittest.IsolatedAsyncioTestCase):
     async def test_story_missing_cross_reference_disables_individual_selection(self):
         self.queues["stories"] = [response([{"id": "123", "status": "PUBLISHED"}])]
         data = (await self.load()).json()
-        self.assertEqual(data["state"], "partial")
+        self.assertEqual(data["state"], "source_exhausted")
+        self.assertIn("story_reference_unverified", data["limitations"])
+        self.assertTrue(data["retrieval_complete"])
         self.assertFalse(data["bulk_selectable"])
         self.assertTrue(all(not item["selectable"] for item in data["items"]))
 
@@ -347,5 +352,164 @@ class LoadContract(unittest.IsolatedAsyncioTestCase):
     async def test_story_only_media_reference_is_not_sufficient_for_posts(self):
         self.queues["stories"] = [response([{"id": "123", "media_id": "900", "status": "PUBLISHED"}])]
         data = (await self.load()).json()
-        self.assertEqual(data["state"], "partial")
+        self.assertEqual(data["state"], "source_exhausted")
+        self.assertIn("story_reference_unverified", data["limitations"])
         self.assertTrue(all(not item["selectable"] for item in data["items"]))
+
+
+class EfficiencyContract(LoadFixture):
+    async def test_story_history_not_scanned_for_small_load(self):
+        self.queues["published_posts"] = [response([post(n) for n in range(1, 21)])]
+        self.queues["stories"] = [response([{"id": "900", "post_id": "11_900", "media_id": "901"}], "stories", "MORE")]
+        result = await self.load(20)
+        self.assertEqual(result.status_code, 200)
+        data = result.json()
+        self.assertEqual(data["state"], "limit_reached")
+        self.assertTrue(data["retrieval_complete"])
+        self.assertFalse(data["bulk_selectable"])
+        self.assertTrue(all(not item["selectable"] for item in data["items"]))
+        self.assertEqual([r.url.path.rsplit('/', 1)[-1] for r in self.calls], ["published_posts", "video_reels", "stories"])
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(self.calls[-1].url.params["limit"], "20")
+        diag = next(s for s in data["sources"] if s["source"] == "stories")
+        self.assertEqual(diag["stop_reason"], "story_verification_budget")
+
+    async def test_empty_candidates_need_no_story_request(self):
+        self.queues["published_posts"] = [response([])]
+        data = (await self.load(20)).json()
+        self.assertEqual(data["state"], "empty")
+        self.assertFalse(any(r.url.path.endswith('/stories') for r in self.calls))
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_missing_story_reference_is_uncertainty_not_pagination_failure(self):
+        self.queues["stories"] = [response([{"id": "900", "post_id": "11_900"}])]
+        data = (await self.load(20)).json()
+        self.assertEqual(data["state"], "source_exhausted")
+        self.assertTrue(data["retrieval_complete"])
+        self.assertNotIn("error", data)
+        self.assertFalse(data["bulk_selectable"])
+        self.assertIn("story_reference_unverified", data["limitations"])
+
+    async def test_cross_dedup_before_stop_and_only_requested_relations(self):
+        self.queues["published_posts"] = [response([post(1), post(2)], "published_posts", "P2"), response([post(3)])]
+        self.queues["video_reels"] = [response([reel(900, "11_1"), reel(901, "11_2")], "video_reels", "R2"), response([reel(902, "11_3")])]
+        data = (await self.load(3)).json()
+        self.assertEqual(data["displayed"], 3)
+        self.assertEqual(data["found"], 3)
+        for request in self.calls:
+            if request.url.path.endswith('/video_reels'):
+                self.assertIn("post_id", request.url.params["fields"].split(','))
+            if request.url.path.endswith('/published_posts'):
+                self.assertNotIn("object_id", request.url.params["fields"].split(','))
+        self.assertGreater(len([r for r in self.calls if r.url.path.endswith('/published_posts')]), 1)
+
+    async def test_cross_alias_duplicates_cannot_pretend_source_exhausted(self):
+        self.queues["published_posts"] = [response([post(1)])]
+        self.queues["video_reels"] = [response([reel(900, "11_1"), reel(901, "11_1"), reel(902, "11_1")], "video_reels", "R2"),
+            response([reel(903, "11_2"), reel(904, "11_3")])]
+        data = (await self.load(3)).json()
+        self.assertEqual(data["displayed"], 3)
+        self.assertEqual(len([r for r in self.calls if r.url.path.endswith('/video_reels')]), 2)
+
+    async def test_request_counts_retry_and_safe_source_errors(self):
+        self.queues["published_posts"] = [httpx.Response(503), response([post(1)], "published_posts", "P2"), httpx.Response(403)]
+        data = (await self.load(20)).json()
+        diag = next(s for s in data["sources"] if s["source"] == "published_posts")
+        self.assertEqual(diag["requests"], 3)
+        self.assertEqual(diag["pages"], 1)
+        self.assertEqual(diag["received"], 1)
+        self.assertEqual(diag["status"], "failed")
+        self.assertEqual(diag["stop_reason"], "permission_denied")
+        self.assertEqual(data["errors"][0]["source"], "published_posts")
+        self.assertNotIn(PAGE_TOKEN, str(data["sources"]) + str(data["errors"]))
+
+    async def test_page_limit_and_repeat_specific_reasons(self):
+        self.application.state.settings = replace(self.settings, posts_max_pages=1)
+        self.queues["published_posts"] = [response([post(1)], "published_posts", "P2")]
+        data = (await self.load(20)).json()
+        diag = next(s for s in data["sources"] if s["source"] == "published_posts")
+        self.assertEqual(diag["stop_reason"], "page_limit")
+        self.assertEqual(diag["requests"], 1)
+
+    async def test_exhausted_1743_is_maximum_not_promised_count(self):
+        self.queues["published_posts"] = [response([post(n) for n in range(start, min(start + 100, 1744))], "published_posts", f"P{start}")
+            for start in range(1, 1702, 100)]
+        self.queues["published_posts"][-1] = response([post(n) for n in range(1701, 1744)])
+        data = (await self.load(3000)).json()
+        self.assertEqual(data["displayed"], 1743)
+        self.assertEqual(data["state"], "source_exhausted")
+        diag = next(s for s in data["sources"] if s["source"] == "published_posts")
+        self.assertEqual(diag["received"], 1743)
+        self.assertEqual(diag["stop_reason"], "source_exhausted")
+        self.assertEqual(diag["requests"], 18)
+
+    async def test_multi_page_20_actual_request_total(self):
+        self.queues["published_posts"] = [response([post(n) for n in range(1, 11)], "published_posts", "P2"), response([post(n) for n in range(11, 21)])]
+        data = (await self.load(20)).json()
+        self.assertEqual(data["displayed"], 20)
+        self.assertEqual(sum(s["requests"] for s in data["sources"]), 4)
+        self.assertEqual(len(self.calls), 4)
+
+    async def test_retry_after_and_fatal_error_stop_correct_sources(self):
+        for issue, reason, attempts in [(httpx.Response(503, headers={"Retry-After": "30"}), "cooldown", 1),
+                (httpx.ReadTimeout(PAGE_TOKEN), "timeout", 3),
+                (httpx.Response(400, json={"error": {"code": 190, "message": PAGE_TOKEN}}), "token_invalid", 1)]:
+            with self.subTest(reason=reason):
+                self.application.state.store.token_cooldowns.clear()
+                self.application.state.store.global_cooldown_until = 0
+                self.queues["published_posts"] = [issue] * 3
+                before = len(self.calls)
+                data = (await self.load(20)).json()
+                first, second, story = data["sources"]
+                self.assertEqual(first["stop_reason"], reason)
+                self.assertEqual(first["requests"], attempts)
+                self.assertEqual(second["status"], "cancelled")
+                self.assertEqual(second["requests"], 0)
+                self.assertEqual(story["requests"], 0)
+                self.assertEqual(len(self.calls) - before, attempts)
+                self.assertNotIn(PAGE_TOKEN, str(data["sources"]) + str(data["errors"]))
+
+    async def test_repeat_invalid_response_and_foreign_pagination_source_reasons(self):
+        for second, expected in [(response([post(1)], "published_posts", "OTHER"), "pagination_repeated"),
+                (httpx.Response(200, json={"data": "wrong"}), "invalid_response"),
+                (httpx.Response(200, json={"data": [post(2)], "paging": {"next": "https://evil.example/?after=X", "cursors": {"after": "X"}}}), "invalid_pagination")]:
+            self.queues = {"published_posts": [response([post(1)], "published_posts", "P2"), second],
+                           "video_reels": [response([])], "stories": [response([])]}
+            data = (await self.load(20)).json()
+            diag = data["sources"][0]
+            self.assertEqual(diag["stop_reason"], expected)
+            self.assertEqual(diag["requests"], 2)
+            self.assertEqual(data["state"], "partial")
+
+    async def test_disconnect_includes_cancelled_source_diagnosis(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def pending(request):
+            entered.set()
+            await release.wait()
+            return response([post(1)])
+        self.queues["published_posts"] = [pending]
+        first = asyncio.create_task(self.load(20))
+        await asyncio.wait_for(entered.wait(), 3)
+        await self.client.post("/api/disconnect", headers=HEADERS)
+        result = await first
+        self.error(result, "load_cancelled")
+        self.assertEqual(result.json()["sources"][0]["status"], "cancelled")
+        self.assertEqual(result.json()["sources"][0]["requests"], 1)
+        self.assertTrue(all(source["stop_reason"] == "load_cancelled" for source in result.json()["sources"]))
+
+    async def test_story_ids_still_excluded_from_available_references(self):
+        self.queues["stories"] = [response([{"id": "900", "post_id": "11_1"}])]
+        self.queues["published_posts"] = [response([post(1), post(2)])]
+        data = (await self.load(20)).json()
+        self.assertEqual([item["object_id"] for item in data["items"]], ["11_2"])
+        self.assertFalse(data["items"][0]["selectable"])
+        self.assertNotIn("error", data)
+
+    async def test_exhausted_server_retries_are_not_invalid_response(self):
+        self.queues["published_posts"] = [httpx.Response(503)] * 3
+        data = (await self.load(20)).json()
+        diagnostic = data["sources"][0]
+        self.assertEqual(diagnostic["requests"], 3)
+        self.assertEqual(diagnostic["stop_reason"], "upstream_error")
+        self.assertEqual(diagnostic["status"], "failed")
+        self.assertEqual(data["state"], "partial")

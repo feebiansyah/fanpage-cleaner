@@ -20,11 +20,14 @@ class Element {
 
 function setup(responses) {
   const ids = ['facebook-token', 'connect', 'disconnect', 'fanpage', 'page-count', 'availability', 'operation-status',
-    'load-posts', 'max-posts', 'content-list', 'select-all', 'selected-count', 'load-status', 'audit-warning', 'local-pagination', 'load-progress'];
+    'load-posts', 'max-posts', 'content-list', 'select-all', 'selected-count', 'load-status', 'audit-warning', 'local-pagination', 'load-progress',
+    'fanpage-search', 'fanpage-search-status', 'source-diagnostics'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id === 'fanpage' ? 'select' : 'div')]));
   elements['max-posts'].value = '100';
   const requests = [];
   const timers = [];
+  const clockNow = Date.now();
+  class TestDate extends Date { static now() { return clockNow; } }
   const context = {
     document: {getElementById: id => elements[id], createElement: tag => new Element(tag)},
     fetch: async (path, options) => {
@@ -34,7 +37,7 @@ function setup(responses) {
       return {ok: true, json: async () => data};
     },
     setTimeout: (fn, delay) => { timers.push({fn, delay}); return timers.length; },
-    clearTimeout: () => {}, Date, URL,
+    clearTimeout: () => {}, Date: TestDate, URL,
   };
   vm.runInNewContext(fs.readFileSync('static/app.js', 'utf8'), context);
   return {elements, requests, timers};
@@ -271,4 +274,63 @@ test('local session expiry clears audit and disables load without Meta polling',
   assert.equal(elements['load-posts'].disabled, true);
   assert.equal(elements['content-list'].children.length, 0);
   assert.equal(requests.length, 2);
+});
+
+test('Fanpage search is local, case insensitive, and pins unmatched active selection', async () => {
+  const session = {...connected, count: 2, pages: [{id: '11', name: 'Alpha'}, {id: '22', name: 'BETA'}]};
+  const {elements, requests} = setup([session, audit(1)]);
+  await tick();
+  await elements['load-posts'].events.click();
+  elements['fanpage-search'].value = 'beta';
+  elements['fanpage-search'].events.input();
+  assert.equal(elements.fanpage.value, '11');
+  assert.equal(elements.fanpage.options.length, 2);
+  assert.match(elements.fanpage.options[0].textContent, /aktif.*luar pencarian/i);
+  assert.match(elements['fanpage-search-status'].textContent, /1 hasil/);
+  assert.equal(elements['content-list'].children.length, 1);
+  assert.equal(requests.length, 2);
+  elements['fanpage-search'].value = 'absent';
+  elements['fanpage-search'].events.input();
+  assert.match(elements['fanpage-search-status'].textContent, /tidak ditemukan/i);
+  assert.equal(elements.fanpage.value, '11');
+  elements['fanpage-search'].value = '22';
+  elements['fanpage-search'].events.input();
+  elements.fanpage.value = '22';
+  elements.fanpage.events.change();
+  assert.equal(elements['content-list'].children.length, 0);
+  assert.equal(requests.length, 2);
+});
+
+test('session status reconciliation preserves active Page still present', async () => {
+  const session = {...connected, count: 2, pages: [{id: '11', name: 'Alpha'}, {id: '22', name: 'Beta'}]};
+  const data = audit(1, {page_id: '22'});
+  const {elements} = setup([session, data, () => { throw new Error('disconnect response lost'); }, session]);
+  await tick();
+  elements.fanpage.value = '22';
+  elements.fanpage.events.change();
+  await elements['load-posts'].events.click();
+  await elements.disconnect.events.click();
+  // Reconciliation reads status: Page22 remains available even though ordered second.
+  assert.equal(elements.fanpage.value, '22');
+});
+
+test('source diagnosis displays request and item counts plus precise stop reason', async () => {
+  const data = audit(1, {state: 'partial', bulk_selectable: false, error: {code: 'permission_denied', source: 'video_reels', message: 'Akses ditolak'},
+    sources: [{source: 'published_posts', requests: 2, pages: 1, received: 20, status: 'limit_reached', stop_reason: 'unique_limit'},
+              {source: 'video_reels', requests: 1, pages: 0, received: 0, status: 'failed', stop_reason: 'permission_denied'}]});
+  const {elements} = setup([connected, data]);
+  await tick();
+  await elements['load-posts'].events.click();
+  assert.equal(elements['source-diagnostics'].children.length, 2);
+  assert.match(elements['source-diagnostics'].children[0].textContent, /2 request.*1 halaman.*20 item/);
+  assert.match(elements['source-diagnostics'].children[1].textContent, /Reels.*Gagal.*izin/i);
+});
+
+test('cooldown from a later source error is honored even when first error is permission', async () => {
+  const first = {source: 'published_posts', code: 'permission_denied', message: 'Izin ditolak'};
+  const second = {source: 'video_reels', code: 'rate_limited', message: 'Rate limit', retry_after: 30};
+  const {elements} = setup([connected, audit(0, {state: 'partial', bulk_selectable: false, error: first, errors: [first, second]})]);
+  await tick();
+  await elements['load-posts'].events.click();
+  assert.equal(elements['load-posts'].disabled, true);
 });

@@ -162,7 +162,7 @@ class GraphClient:
         endpoint = "https://graph.facebook.com/" + self.settings.graph_version + "/me/accounts"
         return await self._get(token, token_key, endpoint, params, deadline)
 
-    async def content_page(self, page_id, edge, fields, token, token_key, limit, cursor, deadline, extra=None):
+    async def content_page(self, page_id, edge, fields, token, token_key, limit, cursor, deadline, extra=None, on_request=None):
         if edge not in {"published_posts", "video_reels", "stories"} or not re.fullmatch(r"[0-9]{1,40}", page_id):
             raise AppError("invalid_page")
         endpoint = "https://graph.facebook.com/" + self.settings.graph_version + "/" + page_id + "/" + edge
@@ -173,17 +173,19 @@ class GraphClient:
         if remaining <= 0:
             raise AppError("timeout", 504)
         try:
-            return await asyncio.wait_for(self._get(token, token_key, endpoint, params, deadline), remaining)
+            return await asyncio.wait_for(self._get(token, token_key, endpoint, params, deadline, on_request), remaining)
         except asyncio.TimeoutError:
             raise AppError("timeout", 504) from None
 
-    async def _get(self, token, token_key, endpoint, params, deadline):
+    async def _get(self, token, token_key, endpoint, params, deadline, on_request=None):
         for attempt in range(3):  # One initial attempt, at most two retries.
             self.store.check_cooldown(token_key)
             if time.monotonic() >= deadline:
                 raise AppError("timeout", 504)
             transient, instruction = False, None
             try:
+                if on_request is not None:
+                    on_request()
                 async with self.http.stream("GET", endpoint, params=params, headers={"Authorization": "Bearer " + token}) as response:
                     status, headers = response.status_code, response.headers
                     if 300 <= status < 400:

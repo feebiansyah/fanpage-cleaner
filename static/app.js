@@ -5,6 +5,11 @@
   const connectButton = document.getElementById("connect");
   const disconnectButton = document.getElementById("disconnect");
   const fanpageSelect = document.getElementById("fanpage");
+  const fanpageSearch = document.getElementById("fanpage-search");
+  const fanpageSearchStatus = document.getElementById("fanpage-search-status");
+  const sourceDiagnostics = document.getElementById("source-diagnostics");
+  let sessionPages = [];
+  let activePageId = "";
   const count = document.getElementById("page-count");
   const status = document.getElementById("availability");
   const operationStatus = document.getElementById("operation-status");
@@ -50,15 +55,16 @@
     loadStatus.setAttribute("aria-busy", String(postsLoading));
   }
 
-  function renderSession(data) {
-    const previousPage = fanpageSelect.value;
-    connected = data.connected === true;
-    hasPages = connected && Boolean(data.pages?.length);
+  function renderFanpageOptions() {
+    const query = fanpageSearch.value.trim().toLowerCase();
+    const matches = sessionPages.filter(page => page.name.toLowerCase().includes(query) || page.id.toLowerCase().includes(query));
+    const active = sessionPages.find(page => page.id === activePageId);
+    const pinned = active && !matches.some(page => page.id === activePageId);
     fanpageSelect.replaceChildren();
-    for (const page of data.pages || []) {
+    for (const page of pinned ? [active, ...matches] : matches) {
       const option = document.createElement("option");
       option.value = page.id;
-      option.textContent = `${page.name} (${page.id})`;
+      option.textContent = `${page.name} (${page.id})${pinned && page.id === activePageId ? " — aktif, di luar pencarian" : ""}`;
       fanpageSelect.appendChild(option);
     }
     if (!fanpageSelect.options.length) {
@@ -67,6 +73,17 @@
       option.textContent = connected ? "Tidak ada Fanpage yang dikembalikan" : "Belum ada Fanpage yang terhubung";
       fanpageSelect.appendChild(option);
     }
+    fanpageSelect.value = activePageId;
+    fanpageSearchStatus.textContent = `${matches.length} hasil pencarian dari ${sessionPages.length} Fanpage.${matches.length === 0 && query ? " Tidak ditemukan." : ""}${pinned ? " Fanpage aktif tetap dipilih meskipun tidak cocok dengan pencarian." : ""}`;
+  }
+
+  function renderSession(data) {
+    const previousPage = activePageId;
+    connected = data.connected === true;
+    hasPages = connected && Boolean(data.pages?.length);
+    sessionPages = connected ? data.pages || [] : [];
+    activePageId = sessionPages.some(page => page.id === previousPage) ? previousPage : sessionPages[0]?.id || "";
+    renderFanpageOptions();
     count.textContent = connected ? `${data.count} Fanpage dimuat dalam sesi ini.` : "Belum ada sesi aktif.";
     if (!connected || previousPage !== fanpageSelect.value) clearAudit();
     message(data.message, connected && data.pages?.length ? "success" : "info");
@@ -102,6 +119,7 @@
       applyCooldown(data.error);
       const error = new Error(data.error?.message || "Request tidak dapat diselesaikan.");
       error.code = data.error?.code;
+      error.sources = data.sources;
       throw error;
     }
     return data;
@@ -133,6 +151,7 @@
     clearTimeout(cacheTimer);
     contentList.replaceChildren();
     localPagination.replaceChildren();
+    sourceDiagnostics.replaceChildren();
     selectAll.disabled = true;
     selectAll.checked = false;
     selectAll.indeterminate = false;
@@ -159,6 +178,29 @@
     selectAll.disabled = !loadedAudit?.bulk_selectable || selectable.length === 0;
     selectAll.checked = selectable.length > 0 && selected.size === selectable.length;
     selectAll.indeterminate = selected.size > 0 && selected.size < selectable.length;
+  }
+
+  function renderSourceDiagnostics(sources = []) {
+    sourceDiagnostics.replaceChildren();
+    const names = {published_posts: "Postingan publik", video_reels: "Reels", stories: "Pemeriksaan Story"};
+    const statuses = {limit_reached: "Batas tercapai", source_exhausted: "Sumber habis", failed: "Gagal", cancelled: "Dibatalkan", not_needed: "Tidak diperlukan"};
+    const reasons = {unique_limit: "batas konten unik gabungan tercapai", source_exhausted: "tidak ada halaman berikutnya",
+      story_verification_budget: "batas pemeriksaan Story satu halaman; histori tidak ditelusuri",
+      no_eligible_candidates: "tidak ada kandidat yang perlu diperiksa", page_limit: "batas halaman lokal",
+      pagination_repeated: "cursor atau halaman berulang", invalid_pagination: "indikator pagination tidak valid",
+      invalid_response: "respons sumber invalid", upstream_error: "respons atau kegagalan layanan sumber tidak dapat digunakan", permission_denied: "akses atau izin ditolak",
+      token_invalid: "token tidak valid atau kedaluwarsa", timeout: "timeout", cooldown: "cooldown",
+      rate_limited: "rate limit", network_error: "gangguan jaringan", session_expired: "sesi kedaluwarsa",
+      load_cancelled: "koneksi diputus"};
+    const countText = value => Number.isInteger(value) && value >= 0 ? String(value) : "tidak tersedia";
+    for (const source of sources) {
+      const reason = source.stop_reason?.startsWith("stopped_after_")
+        ? `pekerjaan dihentikan setelah ${reasons[source.stop_reason.slice(14)] || "kegagalan sumber lain"}`
+        : reasons[source.stop_reason] || "alasan belum tersedia";
+      const row = document.createElement("p");
+      row.textContent = `${names[source.source] || "Sumber"}: ${countText(source.requests)} request (termasuk retry), ${countText(source.pages)} halaman, ${countText(source.received)} item diterima. ${statuses[source.status] || "Status belum tersedia"} — ${reason}.`;
+      sourceDiagnostics.appendChild(row);
+    }
   }
 
   function renderAuditPage() {
@@ -247,7 +289,15 @@
     renderAuditPage();
   });
   fanpageSelect.addEventListener("change", () => {
-    clearAudit();
+    if (activePageId !== fanpageSelect.value) {
+      activePageId = fanpageSelect.value;
+      clearAudit();
+    }
+    renderFanpageOptions();
+    controls();
+  });
+  fanpageSearch.addEventListener("input", () => {
+    renderFanpageOptions();
     controls();
   });
 
@@ -273,11 +323,14 @@
       if (generation !== postsGeneration || !connected || pageId !== fanpageSelect.value || data.page_id !== pageId) return;
       loadedAudit = data;
       applyCooldown(data.error);
+      for (const error of data.errors || []) applyCooldown(error);
+      renderSourceDiagnostics(data.sources);
       const stateText = {partial: "Pengambilan tidak lengkap; hasil parsial. Pilihan massal dinonaktifkan.",
         empty: "Tidak ada konten eligible yang dikembalikan sumber API.",
         limit_reached: "Batas tampilan tercapai pada kandidat yang dimuat.",
         source_exhausted: "Sumber API yang dipakai sudah habis sebelum batas tercapai."}[data.state] || "Hasil belum dapat dipastikan.";
-      loadStatus.textContent = `Ditemukan ${data.found} kandidat unik; ditampilkan ${data.displayed}. ${stateText}${data.error ? ` ${data.error.message}` : ""}`;
+      const errorSource = {published_posts: "Postingan publik", video_reels: "Reels", stories: "Pemeriksaan Story"}[data.error?.source];
+      loadStatus.textContent = `Ditemukan ${data.found} kandidat unik; ditampilkan ${data.displayed}. ${stateText}${data.error ? ` ${errorSource ? `${errorSource}: ` : ""}${data.error.message}` : ""}`;
       auditWarning.textContent = data.warning;
       renderAuditPage();
       if (Number.isFinite(data.cache_ttl_seconds)) {
@@ -290,6 +343,7 @@
     } catch (error) {
       if (generation !== postsGeneration || pageId !== fanpageSelect.value) return;
       loadStatus.textContent = error.message;
+      renderSourceDiagnostics(error.sources);
       if (["session_expired", "load_cancelled"].includes(error.code)) await reconcileAfterFailure(error);
     } finally {
       postsLoading = false;

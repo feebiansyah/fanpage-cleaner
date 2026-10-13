@@ -14,7 +14,7 @@ from errors import AppError
 FIELDS = {
     "published_posts": "id,from,is_published,created_time,scheduled_publish_time,message,full_picture,permalink_url,status_type",
     "video_reels": "id,from,published,post_id,scheduled_publish_time,description,picture,permalink_url",
-    "stories": "id,post_id,media_id,status",
+    "stories": "id,post_id,media_id",
 }
 WIB = timezone(timedelta(hours=7), "Asia/Jakarta")
 LIMITATIONS = ["source_order_unverified", "story_history_coverage_unverified", "api_coverage_unverified", "post_publication_semantics_not_independently_verified"]
@@ -78,148 +78,234 @@ class Source:
         self.seen_cursors = set()
         self.seen_pages = set()
         self.page_count = 0
+        self.requests = 0
+        self.received = 0
+        self.skipped = 0
+        self.excluded = 0
         self.exhausted = False
-        self.stopped = False
+        self.visited = False
+        self.status = None
+        self.stop_reason = None
         self.candidates = {}
+
+    def attempted(self):
+        self.requests += 1
+
+    def summary(self):
+        return {"source": self.edge, "requests": self.requests, "pages": self.page_count,
+                "received": self.received, "eligible": len(self.candidates),
+                "skipped": self.skipped, "excluded_stories": self.excluded,
+                "exhausted": self.exhausted, "status": self.status,
+                "stop_reason": self.stop_reason}
+
+
+def stop_error(reason, code="pagination_incomplete"):
+    error = AppError(code, 502)
+    error.stop_reason = reason
+    return error
 
 
 class ContentLoader:
     def __init__(self, graph, store, settings):
         self.graph, self.store, self.settings = graph, store, settings
 
+    async def _fetch(self, source, page, token_key, secrets, size, deadline, guard):
+        guard()
+        if source.page_count >= self.settings.posts_max_pages:
+            raise stop_error("page_limit")
+        source.visited = True
+        payload = await self.graph.content_page(page.id, source.edge, FIELDS[source.edge],
+            page.access_token, token_key, size, source.cursor, deadline,
+            {"status": '["PUBLISHED","ARCHIVED"]'} if source.edge == "stories" else None,
+            on_request=source.attempted)
+        guard()
+        data = payload.get("data")
+        if not isinstance(data, list) or len(data) > self.settings.page_size or any(not isinstance(i, dict) for i in data):
+            raise stop_error("invalid_response", "upstream_error")
+        source.page_count += 1
+        source.received += len(data)
+        signature = hashlib.sha256(json.dumps(sorted(str(i.get("id", "")) for i in data)).encode()).digest()
+        if data and signature in source.seen_pages:
+            raise stop_error("pagination_repeated")
+        if data:
+            source.seen_pages.add(signature)
+        paging = payload.get("paging", {})
+        if not isinstance(paging, dict):
+            return data, stop_error("invalid_pagination")
+        if "next" not in paging:
+            source.exhausted = True
+            return data, None
+        try:
+            cursor = self.graph._next_cursor(paging, page.id, source.edge)
+        except AppError:
+            return data, stop_error("invalid_pagination")
+        if cursor in source.seen_cursors:
+            return data, stop_error("pagination_repeated")
+        if any(secret and secret in cursor for secret in secrets):
+            return data, stop_error("invalid_pagination")
+        source.seen_cursors.add(cursor)
+        source.cursor = cursor
+        return data, None
+
     async def load(self, browser_id, session_id, page, limit, deadline):
-        token_key = self.store.token_key(page.access_token)
-        session, _ = self.store.require_page(browser_id, session_id, page.id)
-        secrets = [session.user_token] + [p.access_token for p in session.pages if p.access_token]
-        story_ids, story_complete, errors = set(), False, []
-        excluded, scanned, skipped = 0, 0, 0
         sources = [Source("published_posts"), Source("video_reels")]
         stories = Source("stories")
+        all_sources = sources + [stories]
+        session, _ = self.store.require_page(browser_id, session_id, page.id)
+        secrets = [session.user_token] + [p.access_token for p in session.pages if p.access_token]
+        token_key = self.store.token_key(page.access_token)
+        errors, uncertainties, story_ids = [], [], set()
+        story_checked = False
+        story_complete = False
+        fatal = None
 
-        async def fetch(source, size):
+        def guard():
             self.store.require_page(browser_id, session_id, page.id)
-            if source.page_count >= self.settings.posts_max_pages:
-                raise AppError("pagination_incomplete", 502)
-            payload = await self.graph.content_page(page.id, source.edge, FIELDS[source.edge], page.access_token,
-                token_key, size, source.cursor, deadline,
-                {"status": '["PUBLISHED","ARCHIVED"]'} if source.edge == "stories" else None)
-            self.store.require_page(browser_id, session_id, page.id)
-            data = payload.get("data")
-            if not isinstance(data, list) or len(data) > self.settings.page_size or any(not isinstance(i, dict) for i in data):
-                raise AppError("upstream_error", 502)
-            signature = hashlib.sha256(json.dumps(sorted(str(item.get("id", "")) for item in data)).encode()).digest()
-            if data and signature in source.seen_pages:
-                raise AppError("pagination_incomplete", 502)
-            if data:
-                source.seen_pages.add(signature)
-            source.page_count += 1
-            paging = payload.get("paging", {})
-            if not isinstance(paging, dict):
-                raise AppError("pagination_incomplete", 502)
-            # Do not lose useful records if a malicious/repeated next is discovered.
-            next_error = None
-            if "next" not in paging:
-                source.exhausted = True
-            else:
-                try:
-                    cursor = self.graph._next_cursor(paging, page.id, source.edge)
-                    if cursor in source.seen_cursors or any(secret and secret in cursor for secret in secrets):
-                        raise AppError("pagination_incomplete", 502)
-                    source.seen_cursors.add(cursor)
-                    source.cursor = cursor
-                except AppError as error:
-                    next_error = error
-            return data, next_error
 
-        def record_error(error):
+        def failure(source, error):
+            nonlocal fatal
             if error.code == "session_expired":
                 raise error
-            errors.append(error)
+            source.status = "failed"
+            source.stop_reason = getattr(error, "stop_reason", error.code)
+            diagnostic = {**error.payload()["error"], "source": source.edge, "stop_reason": source.stop_reason}
+            if error.code == "pagination_incomplete":
+                diagnostic["message"] = "Pagination sumber konten tidak selesai; hasil parsial."
+            if error.code == "timeout":
+                diagnostic["message"] = "Waktu pengambilan sumber konten habis; hasil parsial."
+            errors.append(diagnostic)
+            if error.code in {"token_invalid", "rate_limited", "cooldown", "timeout"}:
+                fatal = error.code
 
-        try:
-            story_count = 0
-            while not stories.exhausted:
-                data, next_error = await fetch(stories, min(self.settings.page_size, self.settings.story_max_items - story_count))
+        async def acquire(source, size):
+            try:
+                data, next_error = await self._fetch(source, page, token_key, secrets, size, deadline, guard)
+                for item in data:
+                    candidate = self._normalize(item, source.edge, page.id, secrets)
+                    if candidate is None:
+                        source.skipped += 1
+                    elif any(value in story_ids for value in candidate["_story_ids"]):
+                        source.excluded += 1
+                    else:
+                        source.candidates.setdefault(candidate["object_id"], candidate)
+                if next_error:
+                    raise next_error
+                if source.exhausted:
+                    source.status, source.stop_reason = "source_exhausted", "source_exhausted"
+            except AppError as error:
+                failure(source, error)
+
+        async def check_stories():
+            nonlocal story_checked, story_complete
+            story_checked = True
+            try:
+                # No source has verified Story exclusion. One bounded probe preserves
+                # known-ID exclusion; an incomplete probe never enables selection.
+                size = min(limit, self.settings.page_size, self.settings.story_max_items)
+                data, next_error = await self._fetch(stories, page, token_key, secrets, size, deadline, guard)
+                references_complete = True
                 for item in data:
                     for key in ("id", "post_id", "media_id"):
                         value = identifier(item.get(key))
                         if value:
                             story_ids.add(value)
-                    # Missing cross-reference means exclusion cannot be claimed verified.
                     if not identifier(item.get("post_id")) or not identifier(item.get("media_id")):
-                        errors.append(AppError("pagination_incomplete", 502))
-                    story_count += 1
+                        references_complete = False
+                for source in sources:
+                    for key, candidate in list(source.candidates.items()):
+                        if any(value in story_ids for value in candidate["_story_ids"]):
+                            del source.candidates[key]
+                            source.excluded += 1
                 if next_error:
                     raise next_error
-                if story_count >= self.settings.story_max_items and not stories.exhausted:
-                    raise AppError("pagination_incomplete", 502)
-            story_complete = not errors
-        except AppError as error:
-            record_error(error)
+                if not references_complete:
+                    uncertainties.append("story_reference_unverified")
+                story_complete = stories.exhausted and references_complete
+                stories.status = "source_exhausted" if stories.exhausted else "limit_reached"
+                stories.stop_reason = "source_exhausted" if stories.exhausted else "story_verification_budget"
+                if not stories.exhausted:
+                    uncertainties.append("story_probe_incomplete")
+            except AppError as error:
+                failure(stories, error)
+                uncertainties.append("story_probe_failed")
 
-        # Round-robin bounded acquisition. No assumption of API chronological order.
-        while any(not s.exhausted and not s.stopped and len(s.candidates) < limit for s in sources):
+        try:
+            # Neither content source is proven to subsume the other, so visit both
+            # once before deciding on a global unique-candidate stop.
             for source in sources:
-                if source.exhausted or source.stopped or len(source.candidates) >= limit:
-                    continue
-                try:
-                    data, next_error = await fetch(source, min(self.settings.page_size, max(1, limit - len(source.candidates))))
-                    scanned += len(data)
-                    for item in data:
-                        candidate = self._normalize(item, source.edge, page.id, secrets)
-                        if candidate is None:
-                            skipped += 1
-                            continue
-                        if any(value in story_ids for value in candidate.pop("_story_ids")):
-                            excluded += 1
-                            continue
-                        source.candidates.setdefault(candidate["object_id"], candidate)
-                    if next_error:
-                        raise next_error
-                except AppError as error:
-                    record_error(error)
-                    source.stopped = True
-                    if error.code in {"token_invalid", "rate_limited", "cooldown", "timeout"}:
-                        for remaining in sources:
-                            remaining.stopped = True
+                if fatal:
+                    break
+                await acquire(source, min(self.settings.page_size, limit))
+            items, unlinked = self._merge(sources)
+            if items and not fatal:
+                await check_stories()
+            while not fatal:
+                items, unlinked = self._merge(sources)
+                if len(items) >= limit:
+                    break
+                active = [s for s in sources if s.status is None and not s.exhausted]
+                if not active:
+                    break
+                for source in active:
+                    items, unlinked = self._merge(sources)
+                    if len(items) >= limit or fatal:
                         break
+                    await acquire(source, min(self.settings.page_size, max(1, limit - len(items))))
+                    items, unlinked = self._merge(sources)
+                    if items and not story_checked and not fatal:
+                        await check_stories()
+            guard()
+        except asyncio.CancelledError:
+            error = AppError("session_expired", 401) if session.expires_at <= time.monotonic() else AppError("load_cancelled", 409)
+            for source in all_sources:
+                if source.status is None:
+                    source.status, source.stop_reason = "cancelled", error.code
+            error.sources = [s.summary() for s in all_sources]
+            raise error from None
+        except AppError as error:
+            for source in all_sources:
+                if source.status is None:
+                    source.status, source.stop_reason = "cancelled", error.code
+            error.sources = [s.summary() for s in all_sources]
+            raise
 
-        self.store.require_page(browser_id, session_id, page.id)
         items, unlinked = self._merge(sources)
-        items.sort(key=lambda item: (item["_date"] is None,
-                    -item["_date"].timestamp() if item["_date"] else 0, item["key"]))
+        items.sort(key=lambda i: (i["_date"] is None, -i["_date"].timestamp() if i["_date"] else 0, i["key"]))
         found = len(items)
+        for source in sources:
+            if source.status is None:
+                source.status = "cancelled" if fatal else "limit_reached"
+                source.stop_reason = "stopped_after_" + fatal if fatal else "unique_limit"
+        if stories.status is None:
+            stories.status = "cancelled" if fatal else "not_needed"
+            stories.stop_reason = "stopped_after_" + fatal if fatal else "no_eligible_candidates"
         selected = items[:limit]
         for item in selected:
             date = item.pop("_date")
             item.pop("_linked_post", None)
-            item.pop("_video_id", None)
+            item.pop("_story_ids", None)
             item["published_at"] = date.isoformat() if date else None
             item["published_wib"] = date.astimezone(WIB).strftime("%d/%m/%Y %H:%M:%S WIB") if date else "Tanggal tidak tersedia"
             item["selectable"] = story_complete
-        limitations = list(LIMITATIONS)
+        limitations = list(LIMITATIONS) + uncertainties
         if unlinked:
             limitations.append("cross_source_identity_unverified")
-        if skipped:
+        if any(s.skipped for s in sources):
             limitations.append("unverified_or_unpublished_candidates_skipped")
-        if not story_complete:
-            limitations.append("story_scan_incomplete")
-        exhausted = all(source.exhausted for source in sources)
+        exhausted = all(s.exhausted for s in sources)
         state = "partial" if errors else "limit_reached" if found >= limit else "empty" if not selected else "source_exhausted"
         result = {"page_id": page.id, "limit": limit, "state": state, "items": selected,
-                  "found": found, "displayed": len(selected), "scanned": scanned, "excluded_stories": excluded,
-                  "sources_exhausted": exhausted, "limit_reached": found >= limit,
-                  "retrieval_complete": not errors, "coverage_complete": False, "latest_guaranteed": False,
-                  "story_exclusion": "matched_ids_only" if story_complete else "unverified",
+                  "found": found, "displayed": len(selected), "scanned": sum(s.received for s in sources),
+                  "excluded_stories": sum(s.excluded for s in sources), "sources_exhausted": exhausted,
+                  "limit_reached": found >= limit, "retrieval_complete": not errors, "coverage_complete": False,
+                  "latest_guaranteed": False, "story_exclusion": "matched_ids_only" if story_complete else "unverified",
                   "bulk_selectable": not errors and story_complete, "safe_for_delete": False,
                   "limitations": limitations, "warning": AUDIT_WARNING,
-                  "sources": [{"source": s.edge, "pages": s.page_count, "exhausted": s.exhausted} for s in sources]}
+                  "sources": [s.summary() for s in all_sources], "errors": errors}
+        if not story_complete and selected:
+            result["warning"] += " Pemeriksaan Story belum memadai; seluruh checkbox dinonaktifkan."
         if errors:
-            result["error"] = errors[0].payload()["error"]
-            if errors[0].code == "pagination_incomplete":
-                result["error"]["message"] = "Pagination atau pencocokan Story tidak selesai. Hasil audit parsial; pilihan massal dinonaktifkan."
-            elif errors[0].code == "timeout":
-                result["error"]["message"] = "Waktu Load Posts habis. Hasil yang ditampilkan belum lengkap."
+            result["error"] = errors[0]
         return result
 
     def _normalize(self, item, edge, page_id, secrets):
@@ -234,11 +320,9 @@ class ContentLoader:
         if type(scheduled) in {int, float} and scheduled > time.time():
             return None
         is_reel = edge == "video_reels"
-        raw_type = item.get("type")
         status_type = item.get("status_type")
-        kind = "Reel" if is_reel else "Foto" if raw_type == "photo" or status_type == "added_photos" else "Video" if raw_type == "video" or status_type == "added_video" else "Postingan"
+        kind = "Reel" if is_reel else "Foto" if status_type == "added_photos" else "Video" if status_type == "added_video" else "Postingan"
         linked_post = identifier(item.get("post_id")) if is_reel else None
-        video_id = identifier(item.get("object_id")) if not is_reel and kind == "Video" else None
         date = None if is_reel else publication_date(item.get("created_time"))
         return {"key": edge + ":" + raw_id, "object_id": raw_id, "page_id": page_id, "kind": kind,
                 "sources": [{"source": edge, "object_id": raw_id}],
@@ -246,17 +330,18 @@ class ContentLoader:
                 "text": redact(item.get("description") if is_reel else item.get("message"), secrets),
                 "thumbnail": safe_url(item.get("picture") if is_reel else item.get("full_picture"), True, secrets),
                 "permalink": safe_url(item.get("permalink_url"), False, secrets),
-                "_date": date, "_linked_post": linked_post, "_video_id": video_id,
-                "_story_ids": [value for value in (raw_id, linked_post, video_id) if value]}
+                "_date": date, "_linked_post": linked_post,
+                "_story_ids": [value for value in (raw_id, linked_post) if value]}
 
     def _merge(self, sources):
-        posts, reels = sources[0].candidates, sources[1].candidates
+        # Pure: repeated counting must not append the same provenance twice.
+        posts = {key: {**value, "sources": list(value["sources"])} for key, value in sources[0].candidates.items()}
         items = list(posts.values())
-        videos = {p["_video_id"]: p for p in items if p["_video_id"]}
+        related = dict(posts)
         unlinked = False
-        for reel in reels.values():
-            target = posts.get(reel["_linked_post"]) if reel["_linked_post"] else None
-            target = target or videos.get(reel["object_id"])
+        for original in sources[1].candidates.values():
+            reel = {**original, "sources": list(original["sources"])}
+            target = related.get(reel["_linked_post"]) if reel["_linked_post"] else None
             if target is not None:
                 target["kind"] = "Reel"
                 target["sources"].extend(reel["sources"])
@@ -264,5 +349,7 @@ class ContentLoader:
                 target["thumbnail"] = target["thumbnail"] or reel["thumbnail"]
             else:
                 items.append(reel)
+                if reel["_linked_post"]:
+                    related[reel["_linked_post"]] = reel
                 unlinked = True
         return items, unlinked
