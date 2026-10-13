@@ -21,7 +21,7 @@ class Element {
 function setup(responses) {
   const ids = ['facebook-token', 'connect', 'disconnect', 'fanpage', 'page-count', 'availability', 'operation-status',
     'load-posts', 'max-posts', 'content-list', 'select-all', 'selected-count', 'load-status', 'audit-warning', 'local-pagination', 'load-progress',
-    'fanpage-search', 'fanpage-search-status', 'source-diagnostics', 'stop-load'];
+    'fanpage-search', 'fanpage-search-status', 'source-diagnostics', 'stop-load', 'dry-run', 'dry-status', 'dry-results', 'dry-pagination'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id === 'fanpage' ? 'select' : 'div')]));
   elements['max-posts'].value = '100';
   const requests = [];
@@ -440,4 +440,51 @@ test('cooldown wait is capped by job deadline for local expiry reconciliation', 
   await work;
   assert.equal(requests.length,4);
   assert.match(elements['load-status'].textContent,/parsial/i);
+});
+
+test('dry run submits only selected keys and renders concrete ineligible target safely', async () => {
+  const dry={job_id:'a'.repeat(32),terminal:true,state:'completed',selected:1,valid:0,ambiguous:1,duplicates:0,checked:1,
+    pages:[{page_id:'11',name:'<script>Page</script>'}],safe_for_delete:false,
+    items:[{key:'k0',object_id:'11_1',delete_target:'11_1',status:'dry_run_checked',eligible:false,reasons:['story_exclusion_unverified']}]};
+  const {elements,requests}=setup([connected,audit(1),dry]);
+  await tick();
+  await elements['load-posts'].events.click();
+  elements['select-all'].checked=true;
+  elements['select-all'].events.change();
+  await elements['dry-run'].events.click();
+  const sent=requests.find(r=>r.path==='/api/dry-run/jobs');
+  assert.ok(sent);
+  assert.deepEqual(JSON.parse(sent.options.body),{selections:[{page_id:'11',keys:[audit(1).items[0].key]}]});
+  assert.match(elements['dry-status'].textContent,/layak 0/i);
+  assert.match(elements['dry-results'].children[0].textContent,/11_1/);
+  assert.match(elements['dry-results'].children[0].textContent,/Story/);
+});
+
+test('dry run stop cancels polling and uses distinct Stop label', async () => {
+  const dry={job_id:'a'.repeat(32),terminal:false,state:'running',selected:1,valid:0,ambiguous:1,duplicates:0,checked:0,pages:[],items:[]};
+  const {elements,requests}=setup([connected,audit(1),dry,{...dry,terminal:true,state:'cancelled'}]);
+  await tick();await elements['load-posts'].events.click();
+  elements['select-all'].checked=true;elements['select-all'].events.change();
+  const work=elements['dry-run'].events.click();
+  await tick();
+  assert.equal(elements['stop-load'].textContent,'Berhenti dry run');
+  await elements['stop-load'].events.click();
+  await work;
+  assert.equal(requests[3].path,'/api/dry-run/jobs/'+dry.job_id+'/stop');
+  assert.equal(requests.filter(r=>r.path.includes('/api/dry-run/') && r.options.method!== 'POST').length,0);
+});
+
+test('late dry run result from old Page is hidden and cancelled', async () => {
+  let release;
+  const session={...connected,count:2,pages:[{id:'11',name:'A'},{id:'22',name:'B'}]};
+  const dry={job_id:'a'.repeat(32),terminal:false,state:'running',pages:[],items:[]};
+  const {elements,requests}=setup([session,audit(1),()=>new Promise(resolve=>{release=()=>resolve({ok:true,json:async()=>dry});}),{...dry,terminal:true}]);
+  await tick();await elements['load-posts'].events.click();
+  elements['select-all'].checked=true;elements['select-all'].events.change();
+  const work=elements['dry-run'].events.click();
+  await tick();
+  elements.fanpage.value='22';elements.fanpage.events.change();
+  release();await work;await tick();
+  assert.equal(elements['dry-results'].children.length,0);
+  assert.ok(requests.some(r=>r.path.endsWith('/stop')));
 });

@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, urlsplit
+from contextlib import asynccontextmanager
 
 import httpx
 
@@ -132,6 +133,7 @@ class GraphClient:
 
     def _usage(self, headers, token_key):
         # Only numeric allowlisted values are inspected; raw headers are never retained/logged.
+        self.store.governor.usage_known=False
         for header, global_scope in [("x-app-usage", True), ("x-business-use-case-usage", True)]:
             raw = headers.get(header)
             if not raw or len(raw) > 16384:
@@ -151,6 +153,8 @@ class GraphClient:
                     continue
                 values = [item.get(key) for key in ("call_count", "total_time", "total_cputime")]
                 values = [v for v in values if type(v) in {int, float} and 0 <= v <= 100 and math.isfinite(v)]
+                if values:
+                    self.store.governor.observe_usage(max(values))
                 if values and max(values) >= self.settings.usage_threshold:
                     # Local safety policy, not a claim about official quota/reset timing.
                     self.store.cooldown(token_key, self.settings.cooldown_seconds, global_scope)
@@ -189,9 +193,7 @@ class GraphClient:
                 raise AppError("timeout", 504)
             transient, instruction = False, None
             try:
-                if on_request is not None:
-                    on_request()
-                async with self.http.stream("GET", endpoint, params=params, headers={"Authorization": "Bearer " + token}) as response:
+                async with self._stream(token,token_key,endpoint,params,deadline,on_request) as response:
                     status, headers = response.status_code, response.headers
                     if 300 <= status < 400:
                         raise AppError("upstream_error", 502)
@@ -204,7 +206,6 @@ class GraphClient:
                         payload = json.loads(body)
                     except (ValueError, UnicodeError, RecursionError):
                         payload = None
-                self._usage(headers, token_key)
                 instruction = retry_after(headers.get("retry-after"))
                 error = payload.get("error") if isinstance(payload, dict) else None
                 code = error.get("code") if isinstance(error, dict) else None
@@ -247,3 +248,12 @@ class GraphClient:
                 raise AppError("timeout", 504)
             await asyncio.sleep(wait)
         raise AppError("upstream_error", 502)
+
+    @asynccontextmanager
+    async def _stream(self,token,token_key,endpoint,params,deadline,on_request):
+        async with self.store.governor.slot(token_key,deadline):
+            if on_request is not None:
+                on_request()
+            async with self.http.stream('GET',endpoint,params=params,headers={'Authorization':'Bearer '+token}) as response:
+                self._usage(response.headers,token_key)
+                yield response

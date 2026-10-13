@@ -15,6 +15,17 @@
   const operationStatus = document.getElementById("operation-status");
   const loadButton = document.getElementById("load-posts");
   const stopButton = document.getElementById("stop-load");
+  const dryButton = document.getElementById("dry-run");
+  const dryStatus = document.getElementById("dry-status");
+  const dryResults = document.getElementById("dry-results");
+  const dryPagination = document.getElementById("dry-pagination");
+  let lastDryId = null;
+  let dryOffset = 0;
+  let dryLoading = false;
+  let dryJobId = null;
+  let dryGeneration = 0;
+  let dryTimer = null;
+  let wakeDry = null;
   const maxPosts = document.getElementById("max-posts");
   const contentList = document.getElementById("content-list");
   const selectAll = document.getElementById("select-all");
@@ -49,14 +60,16 @@
   }
 
   function controls() {
-    connectButton.disabled = !ready || busy || postsLoading || Date.now() < cooldownUntil;
+    connectButton.disabled = !ready || busy || postsLoading || dryLoading || Date.now() < cooldownUntil;
     disconnectButton.disabled = !ready || busy || !connected;
     tokenInput.disabled = busy;
     fanpageSelect.disabled = busy || !hasPages;
     connectButton.textContent = busy ? "Sedang memproses…" : "Hubungkan";
     status.setAttribute("aria-busy", String(busy));
-    loadButton.disabled = !ready || busy || postsLoading || starting || stopping || !connected || !fanpageSelect.value || Date.now() < cooldownUntil;
-    stopButton.disabled = !postsLoading || stopping;
+    loadButton.disabled = !ready || busy || postsLoading || dryLoading || starting || stopping || !connected || !fanpageSelect.value || Date.now() < cooldownUntil;
+    dryButton.disabled = !ready || busy || postsLoading || dryLoading || !connected || selected.size === 0;
+    stopButton.disabled = (!postsLoading && !dryLoading) || stopping;
+    stopButton.textContent = dryLoading ? "Berhenti dry run" : postsLoading ? "Berhenti memuat" : "Berhenti";
     maxPosts.disabled = postsLoading || busy;
     loadButton.textContent = postsLoading ? "Sedang memuat…" : "Load Posts";
     loadStatus.setAttribute("aria-busy", String(postsLoading));
@@ -151,6 +164,12 @@
   }
 
   function clearAudit() {
+    cancelDry();
+    dryResults.replaceChildren();
+    dryPagination.replaceChildren();
+    lastDryId = null;
+    dryOffset = 0;
+    dryStatus.textContent = "Dry run belum berjalan. Tidak ada penghapusan nyata.";
     cancelContinuation();
     const oldJob = activeJob;
     activeJob = null;
@@ -169,6 +188,64 @@
     selectedCount.textContent = "Terpilih 0 konten.";
     loadStatus.textContent = "Belum ada konten yang dimuat untuk Fanpage ini.";
     loadProgress.setAttribute("value", "0");
+  }
+
+  function wakeDryWait() {
+    clearTimeout(dryTimer);
+    if (wakeDry) wakeDry();
+    wakeDry = null;
+  }
+
+  function cancelDry() {
+    dryGeneration += 1;
+    wakeDryWait();
+    const id = dryJobId;
+    dryJobId = null;
+    dryLoading = false;
+    if (id) void api(`/api/dry-run/jobs/${encodeURIComponent(id)}/stop`, {method:"POST"}).catch(() => {});
+  }
+
+  function renderDry(data) {
+    lastDryId = data.job_id;
+    dryOffset = data.offset || 0;
+    const names=(data.pages || []).map(page => page.name).join(", ");
+    const stateText={queued:"Menunggu antrean",running:"Dry run sedang berjalan",completed:"Pemeriksaan selesai",
+      cancelled:"Pemeriksaan dibatalkan",failed:"Pemeriksaan gagal",paused_needs_reconnect:"Pekerjaan dijeda; pemulihan sesi belum tersedia"};
+    const progress=data.counts ? ` Antrean ${data.counts.queued}, memeriksa ${data.counts.processing}, gagal ${data.counts.failed}, uncertain ${data.counts.uncertain}, dibatalkan ${data.counts.cancelled}.` : "";
+    dryStatus.textContent = `${names}: dipilih ${data.selected}, layak ${data.valid}, belum layak/ambigu ${data.ambiguous}, duplikat ${data.duplicates}; diperiksa ${data.checked}.${progress} ${stateText[data.state] || "Status belum tersedia"}. Tidak ada konten dihapus.`;
+    const reasons={story_exclusion_unverified:"Pengecualian Story seluruh kandidat belum terbukti",delete_permissions_unverified:"Izin penghapusan belum terbukti",
+      success_semantics_unverified:"Semantik sukses penghapusan belum terverifikasi",reel_delete_semantics_unverified:"Penghapusan Reel belum terverifikasi",
+      ambiguous_post_identity:"Relasi identitas Post ambigu",identified_story:"Story teridentifikasi",local_identity_checked:"Identitas lokal diperiksa",
+      interrupted_processing:"Pemeriksaan terinterupsi",cancelled_processing:"Dihentikan saat processing",checkpoint_failed:"Checkpoint gagal",
+      cooldown:"Menunggu cooldown bersama",rate_limited:"Scope dijeda karena rate limit",session_expired:"Sesi kedaluwarsa",
+      session_disconnected:"Sesi diputus",shutdown:"Server berhenti",queue_duration_limit:"Batas durasi antrean",
+      executor_error:"Pemeriksaan lokal terinterupsi",local_check_failed:"Pemeriksaan lokal gagal",
+      token_invalid:"Token invalid; tidak diulang",permission_denied:"Izin ditolak; tidak diulang",
+      timeout_after_send:"Hasil uncertain setelah pengiriman; tidak diulang",timeout_before_send:"Timeout sebelum pengiriman",
+      temporary_before_send:"Kegagalan sementara sebelum pengiriman",executor_contract_invalid:"Kontrak executor tidak valid"};
+    dryResults.replaceChildren();
+    for (const target of data.items || []) {
+      const row=document.createElement("p");
+      row.textContent=`Page ${target.page_id || ""} · key ${target.key} · object ${target.object_id} · usulan target ${target.delete_target || "belum tersedia"} · ${target.status}: ${target.eligible ? "layak untuk pemeriksaan" : "belum layak dihapus"}; ${target.reasons.map(reason => reasons[reason] || "Hambatan pemeriksaan lokal").join("; ")}.`;
+      dryResults.appendChild(row);
+    }
+    dryPagination.replaceChildren();
+    if (data.total > 50) {
+      for (const [label,delta] of [["Sebelumnya",-50],["Berikutnya",50]]) {
+        const button=document.createElement("button");
+        button.type="button";
+        button.textContent=label;
+        button.disabled=delta<0 ? dryOffset===0 : dryOffset+50>=data.total;
+        button.addEventListener("click",async()=>{
+          const generation=dryGeneration;
+          try {
+            const page=await api(`/api/dry-run/jobs/${encodeURIComponent(lastDryId)}?offset=${dryOffset+delta}`);
+            if (generation===dryGeneration) renderDry(page);
+          } catch (error) { if (generation===dryGeneration) dryStatus.textContent=error.message; }
+        });
+        dryPagination.appendChild(button);
+      }
+    }
   }
 
   function cancelContinuation() {
@@ -246,6 +323,7 @@
     selectAll.disabled = !loadedAudit?.bulk_selectable || selectable.length === 0;
     selectAll.checked = selectable.length > 0 && selected.size === selectable.length;
     selectAll.indeterminate = selected.size > 0 && selected.size < selectable.length;
+    controls();
   }
 
   function renderSourceDiagnostics(sources = []) {
@@ -435,6 +513,22 @@
   });
 
   stopButton.addEventListener("click", async () => {
+    if (dryLoading) {
+      const id=dryJobId;
+      dryGeneration += 1;
+      const generation=dryGeneration;
+      wakeDryWait();
+      dryJobId=null;
+      dryLoading=false;
+      controls();
+      if (id) {
+        try {
+          const data=await api(`/api/dry-run/jobs/${encodeURIComponent(id)}/stop`,{method:"POST"});
+          if (generation===dryGeneration) renderDry(data);
+        } catch { if (generation===dryGeneration) dryStatus.textContent="Kelanjutan dry run dihentikan; backend belum mengonfirmasi. Tidak ada penghapusan."; }
+      }
+      return;
+    }
     if (!postsLoading || stopping) return;
     const job = activeJob;
     postsGeneration += 1;
@@ -448,6 +542,35 @@
     if (data && data.page_id === fanpageSelect.value) showAudit(data);
     else loadStatus.textContent = job ? "Kelanjutan dihentikan di browser; backend belum mengonfirmasi penghentian. Pekerjaan tunduk pada batas waktu." : "Pemuatan dihentikan. Halaman yang diterima hanya untuk audit.";
     operationStatus.textContent = "Pemuatan dihentikan; penghapusan tidak tersedia.";
+  });
+
+  dryButton.addEventListener("click", async () => {
+    if (!ready || busy || postsLoading || dryLoading || !connected || selected.size === 0) return;
+    const pageId=fanpageSelect.value;
+    const generation=++dryGeneration;
+    dryLoading=true;
+    controls();
+    try {
+      let data=await api("/api/dry-run/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({selections:[{page_id:pageId,keys:[...selected]}]})});
+      const current=()=>generation===dryGeneration && connected && pageId===fanpageSelect.value;
+      if (!current()) {
+        void api(`/api/dry-run/jobs/${encodeURIComponent(data.job_id)}/stop`,{method:"POST"}).catch(()=>{});
+        return;
+      }
+      dryJobId=data.job_id;
+      while (current()) {
+        renderDry(data);
+        if (data.terminal) break;
+        await new Promise(resolve=>{wakeDry=resolve;dryTimer=setTimeout(()=>{wakeDry=null;resolve();},1000);});
+        if (!current()) return;
+        data=await api(`/api/dry-run/jobs/${encodeURIComponent(dryJobId)}?offset=${dryOffset}`);
+      }
+    } catch (error) {
+      if (generation===dryGeneration) dryStatus.textContent=error.message;
+    } finally {
+      if (generation===dryGeneration) {dryLoading=false;dryJobId=null;controls();}
+    }
   });
 
   connectButton.addEventListener("click", async () => {

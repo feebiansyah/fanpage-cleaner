@@ -53,6 +53,21 @@ class Settings:
     max_audit_entries: int = 20
     max_audit_items: int = 20000
     max_audit_bytes: int = 67108864
+    max_audit_pages: int = 200
+    dry_workers: int = 2
+    graph_request_concurrency: int = 2
+    graph_request_interval: float = 1
+    graph_max_interval: float = 10
+    dry_max_jobs: int = 100
+    dry_max_targets: int = 50000
+    dry_max_bytes: int = 134217728
+    dry_job_ttl: float = 1200
+    dry_max_events: int = 100
+    dry_body_bytes: int = 8388608
+    checkpoint_max_files: int = 100
+    checkpoint_max_file_bytes: int = 67108864
+    checkpoint_max_bytes: int = 268435456
+    checkpoint_retention: float = 604800
 
     def __post_init__(self):
         if not re.fullmatch(r"v[1-9][0-9]?\.0", self.graph_version):
@@ -80,6 +95,14 @@ class Settings:
                 raise ValueError("Batas pekerjaan harus bilangan bulat positif.")
         if self.browser_ttl < self.session_ttl or self.max_token_length > self.max_body_bytes:
             raise ValueError("TTL browser/ukuran body harus mencukupi sesi/token.")
+        if not 1 <= self.dry_workers <= 8 or not 1 <= self.graph_request_concurrency <= min(8,self.max_connections):
+            raise ValueError("Worker/request concurrency melampaui batas lokal.")
+        if self.graph_max_interval < self.graph_request_interval:
+            raise ValueError("Interval maksimum harus mencukupi interval awal.")
+        for name in ("dry_workers","graph_request_concurrency","dry_max_jobs","dry_max_targets","dry_max_bytes",
+                     "dry_max_events","dry_body_bytes","max_audit_pages","checkpoint_max_files","checkpoint_max_file_bytes","checkpoint_max_bytes"):
+            if type(getattr(self,name)) is not int:
+                raise ValueError("Batas antrean harus bilangan bulat positif.")
         if self.cookie_secure and parsed.scheme != "https":
             raise ValueError("COOKIE_SECURE membutuhkan APP_ORIGIN HTTPS.")
 

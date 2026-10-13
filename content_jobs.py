@@ -115,7 +115,7 @@ class ContentJobs:
                 or sum(j.reserved_items for j in self.entries.values()) + job.reserved_items > self.settings.max_content_job_items
                 or sum(j.reserved_bytes for j in self.entries.values()) + job.reserved_bytes > self.settings.max_content_job_bytes):
             raise AppError('audit_capacity', 503)
-        self.store.begin_load(browser_id, session_id, self.store.token_key(page.access_token), limit)
+        self.store.begin_load(browser_id, session_id, self.store.token_key(page.access_token), limit, page_id)
         self.entries[job.id] = job
         return job
 

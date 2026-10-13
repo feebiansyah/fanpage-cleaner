@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from config import Settings
 from errors import AppError
 from content_cache import AuditCache
+from request_governor import RequestGovernor
 
 
 @dataclass
@@ -64,6 +65,8 @@ class MemoryStore:
         self._salt = secrets.token_bytes(32)
         self.audits = AuditCache(settings)
         self.content_jobs = None
+        self.bulk_queue = None
+        self.governor = RequestGovernor(self,settings)
 
     def cleanup(self):
         now = time.monotonic()
@@ -71,6 +74,8 @@ class MemoryStore:
             del self.sessions[key]
         if self.content_jobs is not None:
             self.content_jobs.cleanup()
+        if self.bulk_queue is not None:
+            self.bulk_queue.sync_sessions()
         self.audits.cleanup(self.sessions)
         for key, browser in list(self.browsers.items()):
             if browser.expires_at <= now and not browser.busy and not browser.load_active:
@@ -190,6 +195,8 @@ class MemoryStore:
         if browser and browser.busy:
             raise AppError("connection_busy", 409)
         if self.session(browser_id, session_id) is not None:
+            if self.bulk_queue is not None:
+                self.bulk_queue.pause_session(session_id,'session_disconnected')
             if self.content_jobs is not None:
                 self.content_jobs.discard_session(session_id)
             if browser.load_task is not None:
@@ -207,7 +214,7 @@ class MemoryStore:
             raise AppError("page_not_owned", 403)
         return session, page
 
-    def begin_load(self, browser_id, session_id, token_key, limit):
+    def begin_load(self, browser_id, session_id, token_key, limit, page_id=None):
         browser = self.browser(browser_id)
         if browser is None:
             raise AppError("session_expired", 401)
@@ -224,7 +231,7 @@ class MemoryStore:
                 raise AppError("local_rate_limit", 429, max(1, wait))
         if self.active_jobs >= self.settings.max_jobs:
             raise AppError("job_capacity", 503)
-        self.audits.reserve(session_id, limit)
+        self.audits.reserve(session_id, limit, page_id)
         browser.attempts.append(now)
         self.global_attempt_times.append(now)
         browser.load_active = True

@@ -43,7 +43,7 @@ class ConnectionContract(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.assertTrue(callable(getattr(app_module, "create_app", None)), "App factory dan lifecycle koneksi belum dibuat")
         from config import Settings
-        self.settings = Settings(retry_base=0.001, retry_jitter=0, local_attempts=20)
+        self.settings = Settings(graph_request_interval=.001, retry_base=0.001, retry_jitter=0, local_attempts=20)
         self.calls = []
         self.responses = [httpx.Response(200, json={"data": [page()]})]
 
@@ -107,8 +107,8 @@ class ConnectionContract(unittest.IsolatedAsyncioTestCase):
                     self.disabled.append("disabled" in attrs)
         operations = Operations()
         operations.feed((await self.client.get("/")).text)
-        self.assertEqual(len(operations.buttons), 5)
-        self.assertEqual(operations.disabled, [True, True, True, True])
+        self.assertEqual(len(operations.buttons), 6)
+        self.assertEqual(operations.disabled, [True, True, True, True, True])
         graph_http = self.application.state.http
         self.assertFalse(graph_http.follow_redirects)
         self.assertFalse(graph_http.is_closed)

@@ -2,6 +2,46 @@
 
 Aplikasi FastAPI + Jinja2 satu halaman berbahasa Indonesia. Koneksi tahap 2 menerima **Facebook user access token** dan daftar Fanpage lewat `GET /me/accounts`. Tahap 3 menambahkan **Load Posts untuk audit**. Tidak ada OAuth, pertukaran/perpanjangan token, database, data konten contoh, atau penghapusan. Seluruh request aplikasi ke Meta tetap GET, tanpa DELETE.
 
+## Tahap 4: antrean dan Dry Run saja
+
+**Tidak ada penghapusan nyata, request DELETE, batch mutation, transport delete, atau endpoint/config untuk mengaktifkannya.** Executor runtime hanya memeriksa identitas/metadata lokal. Jangan menafsirkan dry_run_checked sebagai berhasil dihapus.
+
+Cara mencoba: hubungkan sesi, Load Posts limit 100, pilih **5 checkbox**, lalu klik **Periksa Penghapusan (Dry Run)**. Ringkasan menampilkan nama Page, jumlah dipilih, unik, layak, belum layak/ambigu, duplikat, progres dan target konkret. Hapus Terpilih tetap nonaktif. Berhenti memuat dan Berhenti dry run menggunakan tombol yang sama dengan label berbeda. Memilih Page lain membatalkan tampilan/pekerjaan dry run lama. Status dan halaman hasil dry run dibaca dari memori backend, tanpa Meta; pagination daftar Load Posts tetap array lokal 50 item. Tidak ada estimasi waktu penghapusan.
+
+### Identitas dan hambatan validasi
+
+Frontend mengirim `{"selections":[{"page_id":"11","keys":["published_posts:11_1"]}]}`. Key harus berasal dari audit backend milik sesi yang masih berlaku; token, URL, ID delete bebas, field real_delete, Page asing, dan key yang tidak dimuat ditolak. API mendukung hingga 200 kelompok Page per pekerjaan, 5000 key per Page, dan total kapasitas 50000 target. UI sederhana mengirim Page yang sedang dipilih. Audit per Page dipertahankan terbatas agar API dapat memakai beberapa Page dalam satu pekerjaan; default 200 hasil Page, total 20000 item/64 MiB, TTL 300 detik dan selalu tunduk pada sesi. Refresh Page mengganti kapasitas Page tersebut, bukan menduplikasi audit lama.
+
+Key tampilan, object_id sumber, canonical identity, dan delete_target terpisah. [SDK resmi PagePost](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/pagepost.py) memiliki api_delete pada node ID asli. Itu hanya dasar **usulan** target Post, bukan bukti izin/Story/keberhasilan. ID tidak diubah atau digabung menjadi Page_Post. Relasi post_id disimpan persis dari field Reels yang memang diminta, tanpa mengubah format; pencocokan berbeda format tetap tidak diasumsikan sama. Reel tanpa dasar Post memiliki delete_target=null dan alasan reel_delete_semantics_unverified. Tidak ada request validasi per item.
+
+Dokumentasi Page Post/Reels Meta kembali memberi 429. SDK tidak membuktikan published_posts/video_reels bebas Story, dan pemeriksaan Story satu halaman tidak membuktikan seluruh kandidat bebas Story. **Saat ini target hasil Facebook belum dapat dinyatakan layak dihapus**: alasan per target mencakup story_exclusion_unverified, delete_permissions_unverified, success_semantics_unverified, dan bila relevan relasi Reel ambigu. Story teridentifikasi ditolak dengan alasan spesifik. Identitas boleh diperiksa secara dry run walaupun kelayakan delete terhalang. Ketidakpastian dinilai per target dan tidak menghentikan pemeriksaan target lain; safe_for_delete selalu false. Kemunculan Page pada /me/accounts bukan bukti izin menghapus.
+
+### Antrean, worker dan pacing
+
+Antrean terpusat satu proses memakai round robin antar Page, dengan kunci **canonical target**, bukan kunci seluruh Page. Target sama lintas pekerjaan/browser tidak aktif bersamaan. Target berbeda di Page sama boleh paralel. Default **dua worker GLOBAL**, maksimum konfigurasi lokal **8**; ini kebijakan awal, bukan kuota Meta. Batas antrean: 100 pekerjaan, 50000 target, budget konservatif 128 MiB (2048 byte/target), 100 event per pekerjaan, durasi/memori pekerjaan 1200 detik. Kapasitas job/target mencakup pekerjaan selesai yang belum TTL; checkpoint tetap dipertahankan lebih lama.
+
+RequestGovernor dibagi oleh Graph GET koneksi/load dan dispatch pemeriksaan dry run. Default jarak awal **1 detik** antar percobaan, tanpa burst, concurrency global **2**, maksimum lokal 8 serta tidak melebihi pool HTTP. Pemeriksaan dry run menggunakan permit pacing lokal tetapi **tidak mengirim request Meta**. Enam request per langkah Load Posts adalah budget langkah, bukan rate limiter. Test fixtures memakai interval kecil agar suite cepat; tes rate menggunakan interval terukur tersendiri.
+
+Header penggunaan valid di atas 50% menambah interval menjadi setidaknya dua kali interval awal, di atas 80% empat kali (dibatasi GRAPH_MAX_INTERVAL=10 detik). Ambang tahap 2 90% tetap memasang cooldown konservatif. Tidak ada percepatan otomatis setelah request sukses. Header tidak tersedia berarti penggunaan/kuota tidak diketahui, bukan nol. Retry-After dan cooldown store bersama tetap berlaku; rate limit scope tidak diketahui memakai global konservatif. Dry run/fake executor rate limit memasang cooldown sebelum melepas permit agar worker lain menghormatinya. Tidak ada rotasi token/IP/perangkat atau klaim bebas limit.
+
+Konfigurasi: DRY_WORKERS=2, GRAPH_REQUEST_CONCURRENCY=2, GRAPH_REQUEST_INTERVAL=1, GRAPH_MAX_INTERVAL=10, DRY_MAX_JOBS=100, DRY_MAX_TARGETS=50000, DRY_MAX_BYTES=134217728, DRY_JOB_TTL=1200, DRY_MAX_EVENTS=100, DRY_BODY_BYTES=8388608. Ukuran body besar hanya pada endpoint pilihan dry run, bukan input token.
+
+### Kontrak hasil dan checkpoint
+
+State target: queued, processing, dry_run_checked, failed, uncertain, cancelled; succeeded disediakan pada schema untuk rancangan berikutnya, **tidak dihasilkan executor runtime**. Temporary failure sebelum pengiriman dapat dicoba maksimal tiga percobaan, dengan hitungan tersimpan. Token invalid/izin tidak diulang. Timeout atau hasil tidak jelas setelah request dikirim menjadi uncertain tanpa retry buta. Pure classifier tahap berikutnya belum menganggap HTTP 2xx sebagai sukses hapus karena semantik resmi belum dapat diverifikasi. Tidak ada GET sebelum/sesudah tiap target, dan tidak ada asumsi semua DELETE idempotent.
+
+Checkpoint pada folder tetap `runtime/dry-run/` yang sudah diabaikan Git. Format versi 1, nama UUID backend, schema allowlist; tidak menyimpan token user/Page, cookie, session ID, Authorization, cursor, nama/teks/permalink konten, respons Meta mentah. Owner UUID internal nonrahasia terpisah dari credential sesi. Manifest ditulis atomik dengan fsync + replace; progres ditulis sebagai shard maksimal **256 target** dengan generation manifest, sehingga tidak menulis ulang 50000 target pada tiap transisi. Processing dicatat sebelum executor dan hasil setelahnya. Generation lama diabaikan setelah manifest diperbarui.
+
+Batas checkpoint: **100 manifest**, maksimal 196 shard per job pada kapasitas 50000 target, **64 MiB per file**, **256 MiB total termasuk staging/tmp**, retensi **7 hari**. Replace atomik memerlukan ruang salinan sementara; kapasitas penuh ditolak sebelum penulisan. Path bebas dari frontend tidak diterima. Restore membatasi jumlah target dan total byte manifest+shard sebelum membaca; format rusak/tidak kompatibel tetap tidak dapat dieksekusi. File tmp lama dibersihkan menurut retensi. Checkpoint gagal menghentikan dispatch, bukan melanjutkan tanpa pencatatan.
+
+Saat disconnect/sesi habis/shutdown, dispatch baru berhenti; processing menjadi uncertain dan target belum diproses tetap tercatat tanpa token. Sesi tetap **20 menit**, tidak diperpanjang dry run/status. Setelah restart semua record yang dibaca menjadi **paused_needs_reconnect**, processing crash menjadi uncertain. Tidak ada eksekusi otomatis atau pemulihan owner dari Page ID yang sama. **Mekanisme pemulihan ownership eksplisit belum tersedia; checkpoint belum dapat dilanjutkan atau diakses lewat UI/browser baru.** Record disimpan untuk audit nonrahasia, bukan bearer credential.
+
+Endpoint baru: POST /api/dry-run/jobs (keys saja), GET /api/dry-run/jobs/{id}?offset=0 (50 hasil dari memori), POST /api/dry-run/jobs/{id}/stop. Semuanya memerlukan cookie pemilik serta perlindungan origin/client/no-store yang sama. Job ID saja tidak memberi akses. Tidak ada endpoint delete nyata.
+
+Gunakan **satu proses Uvicorn --workers 1** sesuai perintah di bawah. Jangan menambah worker Uvicorn untuk mempercepat antrean; beberapa proses tidak berbagi locks/limiter/sesi. Aplikasi tetap localhost, bukan akses banyak perangkat.
+
+Pengujian tahap ini hanya mock/fake transport dan target dummy. Tes memasukkan **50000 target dummy dari 200 Page** tanpa dispatch, serta mengukur concurrency, pacing, fairness, canonical locks, cooldown, retry, cancel/expiry, secret-free checkpoint dan crash/restart. Ini bukan bukti Facebook nyata atau kelayakan penghapusan.
+
 ## Load Posts bertahap: coba 100, lalu 3000
 
 1. Jalankan satu proses server memakai interpreter `.venv` sesuai perintah Windows di bawah, hubungkan token, lalu pilih Fanpage. **Cari Fanpage** memfilter nama/Page ID lokal tanpa request Meta; pilihan aktif tetap dipertahankan dan ditandai bila di luar pencarian.
@@ -215,7 +255,7 @@ Tidak perlu pytest atau paket tambahan:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m py_compile app.py config.py errors.py sessions.py graph_api.py content.py content_cache.py content_jobs.py
+.\.venv\Scripts\python.exe -m py_compile app.py config.py errors.py sessions.py graph_api.py content.py content_cache.py content_jobs.py bulk_targets.py bulk_queue.py bulk_scheduler.py bulk_executor.py bulk_checkpoint.py request_governor.py
 ```
 
 Jika Node tersedia, tes frontend tanpa npm install:
@@ -252,3 +292,5 @@ Invoke-RestMethod http://127.0.0.1:8000/api/session -Headers @{'X-Fanpage-Client
 - `docs/resumable-load-plan.md`: rancangan dan batas pekerjaan bertahap serta hambatan bukti Story.
 - `docs/load-efficiency-plan.md`: bukti, policy efisiensi, dan rencana regresi perbaikan Load Posts.
 - `requirements.txt`, `.gitignore`: versi paket dan pengecualian rahasia/cache/runtime.
+
+Modul tahap 4: bulk_targets.py (identitas/kelayakan), bulk_queue.py (antrean/fairness/ownership), bulk_scheduler.py (worker), bulk_executor.py (dry run/kontrak), bulk_checkpoint.py (ledger atomik), request_governor.py (pacing/concurrency bersama). Regresi tambahan: tests/test_bulk.py; rancangan: docs/stage4-plan.md.

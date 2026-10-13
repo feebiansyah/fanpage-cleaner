@@ -65,8 +65,12 @@
       <nav id="local-pagination" class="local-pagination" aria-label="Halaman daftar audit lokal"></nav>
       <div class="actions">
         <button class="danger" type="button" disabled aria-describedby="availability">Hapus Terpilih</button>
+        <button id="dry-run" type="button" disabled>Periksa Penghapusan (Dry Run)</button>
         <button id="stop-load" class="secondary" type="button" disabled aria-describedby="load-status">Berhenti</button>
       </div>
+      <p id="dry-status" class="help" role="status" aria-live="polite">Dry run belum berjalan. Tidak ada penghapusan nyata.</p>
+      <div id="dry-results" class="help" aria-label="Hasil pemeriksaan target dry run"></div>
+      <nav id="dry-pagination" class="local-pagination" aria-label="Halaman hasil dry run lokal"></nav>
     </section>
 
     <section class="card" aria-labelledby="progress-title">

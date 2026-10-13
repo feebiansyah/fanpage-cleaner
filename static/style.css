@@ -47,6 +47,7 @@ input[type="checkbox"] { width: 18px; height: 18px; margin: 0; }
 .content-list p { margin: 0 0 8px; }
 .content-list p:last-child { margin-bottom: 0; }
 .actions { display: flex; gap: 12px; margin-top: 18px; }
+#dry-results p { overflow-wrap: anywhere; }
 progress { width: 100%; height: 14px; accent-color: #2551a0; }
 @media (max-width: 540px) {
   .container { margin: 24px auto; }

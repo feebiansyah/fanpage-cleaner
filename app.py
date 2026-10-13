@@ -18,6 +18,11 @@ from graph_api import GraphClient
 from sessions import MemoryStore
 from content import ContentLoader
 from content_jobs import ContentJobs
+from bulk_queue import BulkQueue
+from bulk_scheduler import BulkScheduler
+from bulk_checkpoint import Checkpoints
+from bulk_targets import validate_selections
+from dataclasses import replace
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -98,7 +103,7 @@ async def read_token(request: Request, settings: Settings):
     return token
 
 
-def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTransport | None = None):
+def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTransport | None = None, checkpoint_root=None):
     settings = settings or Settings.from_env()
 
     async def cleanup_loop(store):
@@ -119,9 +124,11 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
             application.state.graph = GraphClient(http, settings, application.state.store)
             application.state.jobs.bind(application.state.graph)
             cleanup = asyncio.create_task(cleanup_loop(application.state.store))
+            await application.state.bulk_scheduler.start()
             try:
                 yield
             finally:
+                await application.state.bulk_scheduler.shutdown()
                 cleanup.cancel()
                 with suppress(asyncio.CancelledError):
                     await cleanup
@@ -133,6 +140,9 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     application.state.store = MemoryStore(settings)
     application.state.jobs = ContentJobs(application.state.store, settings)
     application.state.store.content_jobs = application.state.jobs
+    application.state.bulk=BulkQueue(application.state.store,settings,Checkpoints(checkpoint_root or BASE_DIR/'runtime'/'dry-run',settings))
+    application.state.bulk_scheduler=BulkScheduler(application.state.bulk)
+    application.state.store.bulk_queue=application.state.bulk
     application.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1"])
     application.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
@@ -250,7 +260,7 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         session, page = store.require_page(browser_id, session_id, page_id)
         if not page.access_token:
             raise AppError("page_token_missing", 403)
-        browser = store.begin_load(browser_id, session_id, store.token_key(page.access_token), limit)
+        browser = store.begin_load(browser_id, session_id, store.token_key(page.access_token), limit, page_id)
         deadline = min(session.expires_at, time.monotonic() + current.posts_timeout)
         loader = ContentLoader(application.state.graph, store, current)
         try:
@@ -319,6 +329,34 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     @application.post("/api/posts/jobs/{job_id}/stop")
     async def content_job_stop(request: Request, job_id: str):
         return await application.state.jobs.stop(owned_job(request,job_id,True))
+
+    @application.post("/api/dry-run/jobs")
+    async def start_dry_run(request: Request):
+        check_origin(request,settings,mutation=True)
+        try:
+            payload=await asyncio.wait_for(read_json(request,replace(settings,max_body_bytes=settings.dry_body_bytes)),settings.connect_timeout)
+        except asyncio.TimeoutError:
+            raise AppError('timeout',504) from None
+        browser_id,sid=request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE)
+        targets,duplicates,pages=validate_selections(application.state.store,browser_id,sid,payload)
+        job=application.state.bulk.add(browser_id,sid,targets,duplicates,pages)
+        return application.state.bulk.snapshot(job)
+
+    def owned_dry(request,job_id,mutation=False):
+        check_origin(request,settings,mutation=mutation)
+        return application.state.bulk.owned(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),job_id)
+
+    @application.get("/api/dry-run/jobs/{job_id}")
+    async def dry_status(request: Request,job_id: str,offset: int=0):
+        if offset<0 or offset>settings.dry_max_targets:
+            raise AppError('invalid_selection')
+        return application.state.bulk.snapshot(owned_dry(request,job_id),offset)
+
+    @application.post("/api/dry-run/jobs/{job_id}/stop")
+    async def dry_stop(request: Request,job_id: str):
+        job=owned_dry(request,job_id,True)
+        application.state.bulk.cancel(job)
+        return application.state.bulk.snapshot(job)
 
     return application
 

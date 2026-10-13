@@ -1,6 +1,11 @@
 """Error tetap: tidak pernah menyertakan input, exception, atau pesan Meta."""
 
 MESSAGES = {
+    "invalid_selection": "Pilihan harus berisi Page ID dan key dari hasil audit milik sesi saja.",
+    "audit_expired": "Hasil audit tidak tersedia atau kedaluwarsa. Muat ulang konten sebelum dry run.",
+    "dry_job_not_found": "Pekerjaan dry run tidak tersedia pada sesi browser ini.",
+    "dry_capacity": "Kapasitas antrean/checkpoint penuh. Tunggu atau kurangi pilihan.",
+    "checkpoint_failed": "Checkpoint tidak dapat disimpan. Dispatch dihentikan; tidak ada penghapusan.",
     "job_not_found": "Pekerjaan tidak tersedia pada sesi ini atau sudah kedaluwarsa.",
     "invalid_revision": "Nomor langkah pekerjaan tidak valid. Baca status lokal pekerjaan.",
     "invalid_limit": "Maksimal postingan harus bilangan bulat antara 1 dan 5000.",

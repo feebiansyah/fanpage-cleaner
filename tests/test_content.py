@@ -39,7 +39,7 @@ class LoadFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.calls = []
         self.queues = {"stories": [response([])], "published_posts": [response([post(1)])], "video_reels": [response([])]}
-        self.settings = Settings(retry_base=0.001, retry_jitter=0, local_attempts=20, global_attempts=50)
+        self.settings = Settings(graph_request_interval=.001, retry_base=0.001, retry_jitter=0, local_attempts=20, global_attempts=50)
         async def handler(request):
             self.calls.append(request)
             self.assertEqual(request.method, "GET")
