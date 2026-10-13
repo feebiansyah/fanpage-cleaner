@@ -97,7 +97,9 @@ class AuditCache:
         for source in item.get('sources', []):
             if isinstance(source, dict):
                 if source.get('source') == 'published_posts': identities.add(source.get('object_id'))
-                if source.get('source') == 'video_reels': identities.add(source.get('post_id'))
+                if source.get('source') == 'video_reels':
+                    identities.add(source.get('post_id'))
+                    identities.add(source.get('object_id'))
         now = time.monotonic()
         return any(self.removed_posts.get((page_id, value), 0) > now for value in identities if isinstance(value, str))
 

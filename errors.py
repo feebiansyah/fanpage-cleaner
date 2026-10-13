@@ -1,6 +1,8 @@
 """Error tetap: tidak pernah menyertakan input, exception, atau pesan Meta."""
 
 MESSAGES = {
+    'reel_source_missing': 'Pilihan tidak memiliki ID asli dari listing video_reels. Percobaan Reel tidak memakai ID Post atau ID bebas.',
+    'reel_identity_ambiguous': 'Identitas Reel/video tidak tunggal atau format ID asli tidak valid. Tidak ada ID alternatif yang dicoba.',
     'permission_circuit_capacity': 'Dispatch dihentikan sementara karena kapasitas catatan penolakan lokal penuh; bukan penolakan izin seluruh Page. Target belum dikirim perlu konfirmasi pekerjaan baru setelah jeda.',
     'permission_circuit_open': 'Pengiriman pada Page/token ini dijeda setelah penolakan berulang. Ini bukan bukti seluruh Page kehilangan izin. Target belum dikirim perlu konfirmasi pekerjaan baru setelah jeda.',
     "timeout_before_send": "Batas waktu habis sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.",
@@ -12,7 +14,7 @@ MESSAGES = {
     "bulk_dispatch_stopped": "Dispatch baru dihentikan. Target belum dikirim tidak dianggap terhapus.",
     "bulk_page_blocked": "Dispatch Page ini diblokir karena penolakan izin pada token terkait.",
     "bulk_token_blocked": "Dispatch scope token ini diblokir karena token invalid.",
-    "bulk_target_deleted": "Page Post ini sudah dikonfirmasi berhasil dihapus oleh operasi lain; tidak dikirim ulang.",
+    "bulk_target_deleted": "Target atau alias terkait telah diproses oleh operasi sukses lain; tidak dikirim ulang. Status ini bukan respons penghapusan baru.",
     "invalid_single_delete": "Pilih tepat satu key Post audit; ID atau token bebas tidak diterima.",
     "post_delete_unsupported": "Snapshot target berubah setelah preview. Periksa ulang target sebelum menyiapkan konfirmasi baru.",
     "page_post_missing": "Konten tidak memiliki ID Page Post asli dari published_posts. Penghapusan objek Reel/video melalui ID media aslinya belum terverifikasi; ID tersebut tidak dicoba sebagai pengganti ID Post.",

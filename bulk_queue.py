@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from errors import AppError
+from bulk_targets import identity_locks, suppression_reservations
 
 
 @dataclass
@@ -190,26 +191,28 @@ class BulkQueue:
                         job.state='cooldown'
                         items.append((job_id,index))
                         continue
-                if target.canonical in self.locks or target.retry_at>time.monotonic():
+                lock_keys=identity_locks(target.canonical,target.details)
+                if lock_keys.intersection(self.locks) or target.retry_at>time.monotonic():
                     items.append((job_id,index))
                     continue
                 if job.mode=='delete_page_posts':
-                    singles=sum(c.active for c in self.store.single_delete.confirmations.values()) if self.store.single_delete else 0
-                    if len(self.store.audits.removed_posts)+len(self.success_reservations)+singles>=self.settings.max_audit_items:
+                    singles=sum(self.store.single_delete.reserved_slots(c) for c in self.store.single_delete.confirmations.values()) if self.store.single_delete else 0
+                    reservations=suppression_reservations(target.page_id,target.delete_target,target.details)
+                    if len(self.store.audits.removed_posts)+len(self.success_reservations)+singles+len(reservations)>self.settings.max_audit_items:
                         target.status='blocked'
                         target.reasons.append('audit_capacity')
                         try: self.persist(job,index)
                         except AppError: pass
                         self._complete_real(job)
                         continue
-                    self.success_reservations.add(target.canonical)
-                self.locks.add(target.canonical)
+                    self.success_reservations.update(reservations)
+                self.locks.update(lock_keys)
                 target.status='processing'
                 job.state='running'
                 try: self.persist(job,index)
                 except AppError:
-                    self.locks.discard(target.canonical)
-                    self.success_reservations.discard(target.canonical)
+                    self.locks.difference_update(lock_keys)
+                    self.success_reservations.difference_update(suppression_reservations(target.page_id,target.delete_target,target.details))
                     continue
                 return job,target,index
         return None
@@ -228,8 +231,8 @@ class BulkQueue:
                 target.status=outcome.status
             if outcome.reason not in target.reasons: target.reasons.append(outcome.reason)
             while len(target.reasons)>12: target.reasons.pop()
-        self.locks.discard(target.canonical)
-        self.success_reservations.discard(target.canonical)
+        self.locks.difference_update(identity_locks(target.canonical,target.details))
+        self.success_reservations.difference_update(suppression_reservations(target.page_id,target.delete_target,target.details))
         job.active.pop(target.canonical,None)
         job.events.append({'status':target.status,'reason':outcome.reason})
         while len(job.events)>self.settings.dry_max_events: job.events.popleft()
@@ -367,8 +370,8 @@ class BulkQueue:
                 if target.page_id not in self.rotation: self.rotation.append(target.page_id)
                 job.state='cooldown'
             elif outcome.status=='queued': target.status='cancelled'
-        self.locks.discard(target.canonical)
-        self.success_reservations.discard(target.canonical)
+        self.locks.difference_update(identity_locks(target.canonical,target.details))
+        self.success_reservations.difference_update(suppression_reservations(target.page_id,target.delete_target,target.details))
         job.active.pop(target.canonical,None)
         self._complete_real(job)
         try: self.persist(job,index)

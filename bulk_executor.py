@@ -1,6 +1,7 @@
 """Local dry-run executor and pure future outcome design; no HTTP mutation code."""
 import asyncio
 import time
+from bulk_targets import suppression_ids
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -45,7 +46,8 @@ class PagePostExecutor:
             if reason: raise AppError('bulk_token_blocked' if reason=='token_invalid' else reason if reason in {'permission_circuit_open','permission_circuit_capacity'} else 'bulk_page_blocked',403)
             _,page=q.store.require_page(job.browser_id,job.session_id,target.page_id)
             if not page.access_token: raise AppError('page_token_missing',403)
-            if (q.store.audits.removed_posts.get((target.page_id,target.delete_target),0)>time.monotonic()):
+            identities={target.delete_target,*target.details.get('related_video_ids',[])}
+            if any(q.store.audits.removed_posts.get((target.page_id,node),0)>time.monotonic() for node in identities):
                 raise AppError('bulk_target_deleted',409)
             target.attempts=1
             q.persist(job,index)  # Refuse dispatch if checkpoint cannot record processing.
@@ -61,7 +63,8 @@ class PagePostExecutor:
             if result.get('request_started'):
                 q.record_delete_outcome(target,reason)
             if status=='succeeded':
-                target.cleanup_warning=invalidate_confirmed_post(q.store,target.page_id,target.delete_target)
+                warnings=[invalidate_confirmed_post(q.store,target.page_id,node) for node in sorted(suppression_ids(target.delete_target,target.details))]
+                target.cleanup_warning=next((warning for warning in warnings if warning),None)
                 if target.cleanup_warning: target.reasons.append(target.cleanup_warning)
         except AppError as error:
             reason=q.block_reason(target) or error.code

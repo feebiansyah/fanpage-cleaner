@@ -10,6 +10,7 @@ from content import identifier, safe_url
 from errors import AppError, MESSAGES
 from graph_api import delete_internal_code
 from content_cache import invalidate_confirmed_post
+from bulk_targets import identity_locks, suppression_ids
 
 
 CONFIRMATION_TTL = 60
@@ -56,7 +57,7 @@ class SingleDelete:
         self.store.require_page(browser_id,sid,record['result']['target']['page_id'])
         return copy.deepcopy(record)
 
-    def resolve(self, browser_id, sid, page_id, key):
+    def resolve(self, browser_id, sid, page_id, key, operation_scope='page_post'):
         session, page = self.store.require_page(browser_id, sid, page_id)
         if not page.access_token:
             raise AppError('page_token_missing', 403)
@@ -81,40 +82,65 @@ class SingleDelete:
         if any(s.get('source') not in {'published_posts','video_reels'} or not identifier(s.get('object_id')) for s in sources):
             raise AppError('post_identity_ambiguous',409)
         posts = [s for s in sources if s['source'] == 'published_posts']
-        if not posts:
-            raise AppError('page_post_missing',409)
         nodes = {s['object_id'] for s in posts}
-        if len(nodes) != 1:
-            raise AppError('post_identity_ambiguous',409)
-        node = next(iter(nodes))  # Never synthesize or reformat an ID.
         reels = [s for s in sources if s['source'] == 'video_reels']
-        if (any(s.get('post_id') != node for s in reels)
-                or item.get('object_id') not in {s['object_id'] for s in sources}):
+        linked_post=None
+        if operation_scope=='reel_video':
+            videos={s['object_id'] for s in reels}
+            if not videos: raise AppError('reel_source_missing',409)
+            if len(videos)!=1 or len(nodes)>1: raise AppError('post_identity_ambiguous',409)
+            node=next(iter(videos))
+            if not node.isdigit() or len(node)>40: raise AppError('reel_identity_ambiguous',409)
+            raw_links=[s['post_id'] for s in reels if s.get('post_id') is not None]
+            if any(not identifier(link) for link in raw_links): raise AppError('post_identity_ambiguous',409)
+            links=set(raw_links)
+            if len(links)>1:
+                raise AppError('post_identity_ambiguous',409)
+            linked_post=next(iter(links)) if links else None
+            if linked_post and '_' in linked_post and linked_post.split('_',1)[0]!=page_id:
+                raise AppError('post_identity_ambiguous',409)
+            if nodes and (not linked_post or nodes!={linked_post}):
+                raise AppError('post_identity_ambiguous',409)
+        elif operation_scope=='page_post':
+            if not posts: raise AppError('page_post_missing',409)
+            if len(nodes)!=1: raise AppError('post_identity_ambiguous',409)
+            node=next(iter(nodes))  # Never synthesize or reformat an ID.
+            if any(s.get('post_id') != node for s in reels):
+                raise AppError('post_identity_ambiguous',409)
+        else: raise AppError('invalid_single_delete')
+        if item.get('object_id') not in {s['object_id'] for s in sources}:
             raise AppError('post_identity_ambiguous',409)
-        story_ids = {s['object_id'] for s in sources} | {node}
+        story_ids = {s['object_id'] for s in sources} | {node,linked_post}
         for job in self.store.content_jobs.entries.values():
             if job.page_id == page_id and story_ids.intersection(job.story_ids):
                 raise AppError('identified_story', 409)
         link = safe_url(item.get('permalink'), False, [session.user_token, page.access_token])
         if link is None:
             raise AppError('post_permalink_missing', 409)
+        if operation_scope=='reel_video':
+            # A merged audit row may carry the Post permalink. The manual link opens
+            # the exact original Reel ID; it is never used to derive a DELETE target.
+            link='https://www.facebook.com/reel/'+node
         name = next(p['name'] for p in session.metadata() if p['id'] == page_id)
         target = {'key': key, 'target_id': node, 'page_id': page_id, 'page_name': name,
                   'kind': item.get('kind') or 'Jenis tidak tersedia', 'text': item.get('text', '')[:500],
-                  'operation_scope':'page_post', 'media_deletion_guaranteed':False,
+                  'operation_scope':operation_scope, 'media_deletion_guaranteed':False,
+                  'related_video_ids':sorted({s['object_id'] for s in reels}),
+                  'linked_post_id':linked_post,
+                  'thumbnail':safe_url(item.get('thumbnail'),True,list(self.store.known_tokens())),
                   'published_wib': item.get('published_wib') or 'Tanggal tidak tersedia', 'permalink': link}
         # Snapshot identity/provenance/visible metadata, not tokens or supplied delete IDs.
         identity = (node, tuple(sorted((s['source'], s['object_id'], s.get('post_id') or '') for s in sources)),
-                    target['kind'], target['text'], target['published_wib'], target['permalink'])
+                    target['kind'], target['text'], target['published_wib'], target['permalink'],target['thumbnail'],operation_scope)
         return session, page, target, identity
 
-    def prepare(self, browser_id, sid, payload):
+    def prepare(self, browser_id, sid, payload, operation_scope='page_post'):
         if (not isinstance(payload, dict) or set(payload) != {'page_id', 'keys'}
                 or not isinstance(payload['page_id'], str) or not payload['page_id'].isdigit()
                 or len(payload['page_id']) > 40 or not isinstance(payload['keys'], list) or len(payload['keys']) != 1
                 or not isinstance(payload['keys'][0], str) or len(payload['keys'][0]) > 160):
             raise AppError('invalid_single_delete')
-        session, _, target, identity = self.resolve(browser_id, sid, payload['page_id'], payload['keys'][0])
+        session, _, target, identity = self.resolve(browser_id, sid, payload['page_id'], payload['keys'][0],operation_scope)
         self.cleanup()
         if (len(self.confirmations) >= MAX_CONFIRMATIONS
                 or sum(c.session_id == sid for c in self.confirmations.values()) >= MAX_PER_SESSION):
@@ -123,10 +149,11 @@ class SingleDelete:
         expiry = min(session.expires_at, time.monotonic()+CONFIRMATION_TTL)
         self.confirmations[cid] = Confirmation(browser_id, sid, copy.deepcopy(target), identity, expiry)
         return {'confirmation_id': cid, 'expires_in_seconds': max(0, int(expiry-time.monotonic())),
+                'experimental':operation_scope=='reel_video','contract_verified':operation_scope!='reel_video',
                 'target': target, 'story_automatically_verified': False,
-                'message': 'Periksa permalink: pastikan target adalah Page Post yang ingin dihapus, bukan Facebook Story. Operasi menargetkan Page Post, bukan jaminan menghapus objek foto/video/Reel secara terpisah. Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.'}
+                'message': 'Percobaan SATU Reel memakai ID video asli; kontrak API Reel belum terverifikasi. Periksa link dan pastikan target benar, bukan Story. Ini penghapusan nyata dan tidak dapat dibatalkan; bulk Reel tidak aktif.' if operation_scope=='reel_video' else 'Periksa permalink: pastikan target adalah Page Post yang ingin dihapus, bukan Facebook Story. Operasi menargetkan Page Post, bukan jaminan menghapus objek foto/video/Reel secara terpisah. Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.'}
 
-    async def execute(self, graph, browser_id, sid, payload):
+    async def execute(self, graph, browser_id, sid, payload, operation_scope='page_post'):
         if (not isinstance(payload, dict) or set(payload) != {'confirmation_id', 'manual_target_confirmed'}
                 or payload['manual_target_confirmed'] is not True
                 or not isinstance(payload['confirmation_id'], str) or len(payload['confirmation_id']) > 100):
@@ -136,21 +163,25 @@ class SingleDelete:
             raise AppError('session_expired', 401)
         if entry is None or entry.browser_id != browser_id or entry.session_id != sid:
             raise AppError('confirmation_not_found', 404)
+        if entry.target['operation_scope']!=operation_scope:
+            raise AppError('confirmation_not_found',404)
         self.store.require_page(browser_id, sid, entry.target['page_id'])
         if entry.used:
             raise AppError('confirmation_used', 409)
         if time.monotonic() >= entry.expires_at:
             raise AppError('confirmation_expired', 409)
-        session, page, _, identity = self.resolve(browser_id, sid, entry.target['page_id'], entry.target['key'])
+        session, page, _, identity = self.resolve(browser_id, sid, entry.target['page_id'], entry.target['key'],operation_scope)
         if identity != entry.identity:
             raise AppError('post_delete_unsupported', 409)
-        canonical = 'post:'+entry.target['target_id']
-        if canonical in self.queue.locks:
+        canonical = ('video:' if operation_scope=='reel_video' else 'post:')+entry.target['target_id']
+        locks=identity_locks(canonical,entry.target)
+        removal_ids=suppression_ids(entry.target['target_id'],entry.target)
+        if locks.intersection(self.queue.locks):
             raise AppError('target_busy', 409)
-        if len(self.store.audits.removed_posts)+sum(c.active for c in self.confirmations.values())+len(self.queue.success_reservations) >= self.store.settings.max_audit_items:
+        if len(self.store.audits.removed_posts)+sum(self.reserved_slots(c) for c in self.confirmations.values())+len(self.queue.success_reservations)+len(removal_ids) > self.store.settings.max_audit_items:
             raise AppError('delete_capacity', 503)
         entry.used, entry.active = True, True  # Atomic single-use + canonical lock before any await.
-        self.queue.locks.add(canonical)
+        self.queue.locks.update(locks)
         started = time.monotonic()
         deadline = min(session.expires_at, entry.expires_at, started+self.store.settings.operation_timeout)
         scope = self.store.token_key(page.access_token)
@@ -164,7 +195,7 @@ class SingleDelete:
         def token_at_dispatch():
             if time.monotonic() >= entry.expires_at:
                 raise AppError('confirmation_expired', 409)
-            _, current_page, _, current_identity = self.resolve(browser_id, sid, entry.target['page_id'], entry.target['key'])
+            _, current_page, _, current_identity = self.resolve(browser_id, sid, entry.target['page_id'], entry.target['key'],operation_scope)
             current_scope=self.store.token_key(current_page.access_token)
             if current_scope in self.queue.blocked_scopes: raise AppError('token_invalid',401)
             if self.queue.permission_capacity_until>time.monotonic(): raise AppError('permission_circuit_capacity',429)
@@ -174,13 +205,15 @@ class SingleDelete:
                 raise AppError('post_delete_unsupported', 409)
             return current_page.access_token
         try:
-            outcome = await graph.delete_post_once(entry.target['target_id'], scope, deadline, token_at_dispatch, observation)
+            send=graph.delete_reel_once if operation_scope=='reel_video' else graph.delete_post_once
+            outcome = await send(entry.target['target_id'], scope, deadline, token_at_dispatch, observation)
             if outcome.get('request_started'):
                 from types import SimpleNamespace
                 self.queue.record_delete_outcome(SimpleNamespace(page_id=entry.target['page_id'],scope=scope),outcome['reason'])
             if outcome['outcome'] == 'succeeded':
                 observation['phase']='cache_invalidation'
-                outcome['cleanup_warning']=invalidate_confirmed_post(self.store,entry.target['page_id'],entry.target['target_id'])
+                warnings=[invalidate_confirmed_post(self.store,entry.target['page_id'],node) for node in sorted(removal_ids)]
+                outcome['cleanup_warning']=next((warning for warning in warnings if warning),None)
         except AppError as error:
             outcome = {**observation,'outcome': 'uncertain' if observation.get('request_started') else 'failed',
                        'reason': 'internal_error' if observation.get('request_started') else error.code,
@@ -196,9 +229,9 @@ class SingleDelete:
                        'internal_code':delete_internal_code(error,observation['phase'])}
         finally:
             entry.active = False
-            self.queue.locks.discard(canonical)
+            self.queue.locks.difference_update(locks)
             self.queue.changed.set()
-            diagnostic = {'operation':'delete_one_page_post', 'target_id':entry.target['target_id'],
+            diagnostic = {'operation':'delete_one_reel_trial' if operation_scope=='reel_video' else 'delete_one_page_post', 'target_id':entry.target['target_id'],
                           'http_status':outcome.get('http_status') if outcome else None,
                           'error_code':outcome.get('error_code') if outcome else None,
                           'error_subcode':outcome.get('error_subcode') if outcome else None,
@@ -213,7 +246,12 @@ class SingleDelete:
                    else 'Hasil penghapusan belum dapat dipastikan. Post tetap ditampilkan. Jangan ulang otomatis; periksa Facebook secara manual.' if outcome['outcome']=='uncertain'
                    else 'Batas waktu lokal habis sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.' if reason == 'timeout'
                    else MESSAGES.get(reason, 'Percobaan penghapusan gagal. Post tetap ditampilkan.'))
+            if operation_scope=='reel_video':
+                message=('Respons memenuhi kriteria sukses percobaan Reel (success boolean true). Cocokkan di Facebook; ini bukan bukti seluruh Reel didukung.' if outcome['outcome']=='succeeded'
+                    else 'Hasil percobaan Reel belum pasti. Target tetap ditampilkan; jangan ulang otomatis.' if outcome['outcome']=='uncertain'
+                    else MESSAGES.get(reason,'Percobaan Reel gagal; target tetap ditampilkan.'))
             result = {**outcome, 'target':copy.deepcopy(entry.target), 'diagnostic':diagnostic, 'message':message,
+                      'experimental':operation_scope=='reel_video','contract_verified':operation_scope!='reel_video',
                       'manual_target_confirmed':True, 'story_automatically_verified':False, 'safe_for_bulk_delete':False}
             if sid in self.store.sessions and self.store.sessions[sid].expires_at > time.monotonic():
                 # Latest start wins; an older completion must not replace a newer attempt.
@@ -222,3 +260,8 @@ class SingleDelete:
             else:
                 self.last_results.pop(sid,None)
         return result
+
+    @staticmethod
+    def reserved_slots(entry):
+        if not entry.active: return 0
+        return len(suppression_ids(entry.target['target_id'],entry.target))

@@ -24,7 +24,7 @@ function setup(responses) {
   const ids = ['facebook-token', 'connect', 'disconnect', 'fanpage', 'page-count', 'availability', 'operation-status',
     'load-posts', 'max-posts', 'content-list', 'select-all', 'selected-count', 'load-status', 'audit-warning', 'local-pagination', 'load-progress',
     'fanpage-search', 'fanpage-search-status', 'source-diagnostics', 'stop-load', 'dry-run', 'dry-status', 'dry-results', 'dry-pagination',
-    'delete-one', 'delete-dialog', 'delete-details', 'delete-manual-check', 'delete-cancel', 'delete-confirm', 'delete-status',
+    'delete-one', 'delete-one-reel', 'delete-dialog-title', 'delete-warning', 'delete-manual-text', 'delete-help', 'delete-dialog', 'delete-details', 'delete-manual-check', 'delete-cancel', 'delete-confirm', 'delete-status',
     'delete-diagnosis', 'delete-read-last', 'delete-selected', 'bulk-dialog', 'bulk-details', 'bulk-manual-check', 'bulk-cancel', 'bulk-confirm', 'bulk-status', 'bulk-results', 'bulk-read'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id === 'fanpage' ? 'select' : 'div')]));
   elements['max-posts'].value = '100';
@@ -852,4 +852,138 @@ test('template separates dry run and collapses detailed diagnosis',()=>{
   assert.match(html,/<details><summary>Detail hasil penghapusan<\/summary>/);
   assert.match(html,/<details><summary>Pemeriksaan lokal \(Dry Run\)<\/summary>/);
   assert.doesNotMatch(html,/Penghapusan massal tetap nonaktif|Daftar hanya untuk audit/);
+});
+
+test('experimental Reel preview uses its own route and blocks wrong scope', async () => {
+  const reel = {...preparedPost,target:{...preparedPost.target,operation_scope:'reel_video',target_id:'900',thumbnail:'https://scontent.fbcdn.net/reel.jpg'}};
+  const {elements,requests}=setup([connected,onePostAudit(),reel]);
+  await tick(); await elements['load-posts'].events.click(); choose(elements);
+  assert.equal(elements['delete-one-reel'].disabled,false);
+  await elements['delete-one-reel'].events.click();
+  assert.equal(requests[2].path,'/api/reels/delete/prepare');
+  assert.equal(elements['delete-dialog'].open,true);
+  assert.match(elements['delete-warning'].textContent,/Eksperimental/);
+  assert.match(elements['delete-details'].children.map(x=>x.textContent).join(' '),/ID video Reel asli: 900/);
+  assert.equal(elements['delete-details'].children.find(x=>x.tag==='img').src,'https://scontent.fbcdn.net/reel.jpg');
+  const wrong=setup([connected,onePostAudit(),preparedPost]);
+  await tick(); await wrong.elements['load-posts'].events.click(); choose(wrong.elements);
+  await wrong.elements['delete-one-reel'].events.click();
+  assert.notEqual(wrong.elements['delete-dialog'].open,true);
+});
+
+
+function preparedReel(extra = {}) {
+  return {...preparedPost, target:{...preparedPost.target, operation_scope:'reel_video', target_id:'900', kind:'Reel', ...extra}};
+}
+
+async function openReel(elements) {
+  await tick(); await elements['load-posts'].events.click(); choose(elements);
+  await elements['delete-one-reel'].events.click();
+}
+
+test('Reel cancel and expiry cannot replay or cross to Post execution', async () => {
+  for (const cancel of ['button','escape','expiry']) {
+    const {elements,requests,timers}=setup([connected,onePostAudit(),preparedReel()]);
+    await openReel(elements);
+    assert.equal(elements['delete-one'].disabled,true);
+    await elements['delete-one'].events.click();
+    elements['delete-manual-check'].checked=true;
+    if(cancel==='button') elements['delete-cancel'].events.click();
+    if(cancel==='escape') elements['delete-dialog'].events.cancel({preventDefault(){}});
+    if(cancel==='expiry') timers.find(x=>x.delay===60000).fn();
+    await elements['delete-confirm'].events.click();
+    assert.equal(requests.length,3,cancel);
+    assert.equal(elements['delete-dialog'].open,false,cancel);
+  }
+});
+
+test('Reel uncertain response retains target and clears dry report without retry', async () => {
+  const reel=preparedReel();
+  for(const response of [{outcome:'uncertain',target:reel.target},()=>{throw new Error('lost');}]) {
+    const {elements,requests}=setup([connected,onePostAudit(),reel,response]);
+    await openReel(elements);
+    elements['dry-status'].hidden=false; elements['dry-results'].hidden=false;
+    await elements['delete-confirm'].events.click();
+    assert.equal(requests.length,3);
+    elements['delete-manual-check'].checked=true;
+    await elements['delete-confirm'].events.click();
+    await elements['delete-confirm'].events.click();
+    assert.equal(requests.length,4);
+    assert.equal(requests[3].path,'/api/reels/delete/execute');
+    assert.deepEqual(JSON.parse(requests[3].options.body),{confirmation_id:reel.confirmation_id,manual_target_confirmed:true});
+    assert.equal(elements['content-list'].children.length,1);
+    assert.equal(elements['dry-status'].hidden,true); assert.equal(elements['dry-results'].hidden,true);
+  }
+});
+
+test('Reel success removes original video provenance aliases and exact linked Post only', async () => {
+  const reel=preparedReel({linked_post_id:'11_2'}), data=onePostAudit(5);
+  data.items[0].sources=[{source:'video_reels',object_id:'900'}];
+  data.items[1].sources=[{source:'video_reels',object_id:'900'}];
+  data.items[2].sources=[{source:'published_posts',object_id:'11_2'}];
+  // Same text and date are deliberately shared with survivors, which must stay.
+  data.items[3].sources=[{source:'video_reels',object_id:'901'}];
+  const {elements,requests}=setup([connected,data,reel,{outcome:'succeeded',target:reel.target}]);
+  await openReel(elements); elements['delete-manual-check'].checked=true;
+  await elements['delete-confirm'].events.click();
+  assert.equal(elements['content-list'].children.length,2);
+  assert.match(elements['load-status'].textContent,/2 konten/);
+  await elements['delete-confirm'].events.click(); assert.equal(requests.length,4);
+});
+
+test('Reel prepare rejects Post scope and Post prepare rejects Reel scope', async () => {
+  const {elements,requests}=setup([connected,onePostAudit(),preparedReel()]);
+  await tick(); await elements['load-posts'].events.click(); choose(elements);
+  await elements['delete-one'].events.click(); elements['delete-manual-check'].checked=true;
+  await elements['delete-confirm'].events.click();
+  assert.equal(requests.length,3); assert.notEqual(elements['delete-dialog'].open,true);
+  assert.match(elements['delete-status'].textContent,/cakupan/);
+});
+
+test('Reel preview suppresses unsafe thumbnail and link without rendering external requests', async () => {
+  for(const thumbnail of ['javascript:alert(1)','https://evil.example/image.jpg','https://fbcdn.net/image.jpg?access_token=private']) {
+    const {elements}=setup([connected,onePostAudit(),preparedReel({thumbnail})]);
+    await openReel(elements);
+    assert.equal(elements['delete-details'].children.filter(x=>x.tag==='img').length,0);
+    assert.match(elements['delete-manual-text'].textContent,/Reel.*bukan Story/);
+  }
+  const {elements}=setup([connected,onePostAudit(),preparedReel({permalink:'https://evil.example/reel/900'})]);
+  await openReel(elements); assert.notEqual(elements['delete-dialog'].open,true);
+});
+
+test('Reel double confirmation is suppressed and Page change ignores old success', async () => {
+  let release; const reel=preparedReel();
+  const {elements,requests}=setup([connected,onePostAudit(),reel,()=>new Promise(resolve=>{
+    release=()=>resolve({ok:true,json:async()=>({outcome:'succeeded',target:reel.target})});
+  })]);
+  await openReel(elements); elements['delete-manual-check'].checked=true;
+  const first=elements['delete-confirm'].events.click(); await elements['delete-confirm'].events.click();
+  assert.equal(requests.length,4);
+  elements.fanpage.value='22'; elements.fanpage.events.change(); release(); await first;
+  assert.equal(elements['content-list'].children.length,0);
+  assert.doesNotMatch(elements['load-status'].textContent,/berhasil dihapus/);
+});
+
+test('Reel disconnect suppresses pending success and last-result identifies explicit Reel scope', async () => {
+  let release; const reel=preparedReel();
+  const {elements,requests}=setup([connected,onePostAudit(),reel,()=>new Promise(resolve=>{
+    release=()=>resolve({ok:true,json:async()=>({outcome:'succeeded',target:reel.target})});
+  }),disconnected]);
+  await openReel(elements); elements['delete-manual-check'].checked=true;
+  const first=elements['delete-confirm'].events.click(); await elements.disconnect.events.click(); release(); await first;
+  assert.equal(elements['content-list'].children.length,0); assert.equal(requests.length,5);
+  assert.equal(elements['delete-one-reel'].disabled,true);
+  const local=setup([connected,{result:{outcome:'uncertain',operation_scope:'reel_video',target:reel.target}}]);
+  await tick(); await local.elements['delete-read-last'].events.click();
+  assert.match(local.elements['delete-diagnosis'].children[0].textContent,/video Reel asli/);
+  assert.equal(local.requests[1].path,'/api/posts/delete/last');
+});
+
+test('Reel response with mismatched scope cannot report or remove a successful target', async () => {
+  const reel=preparedReel();
+  const {elements}=setup([connected,onePostAudit(),reel,{outcome:'succeeded',target:{...reel.target,operation_scope:'page_post'}}]);
+  await openReel(elements); elements['delete-manual-check'].checked=true;
+  await elements['delete-confirm'].events.click();
+  assert.equal(elements['content-list'].children.length,1);
+  assert.match(elements['delete-status'].textContent,/Berhasil 0.*belum pasti 1/);
 });

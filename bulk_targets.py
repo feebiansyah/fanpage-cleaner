@@ -4,6 +4,30 @@ from content import identifier
 from errors import AppError
 
 
+def identity_locks(canonical, details):
+    """Known provenance aliases are locks, never alternate DELETE targets."""
+    locks={canonical}
+    for video_id in details.get('related_video_ids',[]):
+        if identifier(video_id):
+            locks.add('video:'+video_id)
+    linked=details.get('linked_post_id')
+    if identifier(linked): locks.add('post:'+linked)
+    return locks
+
+
+def suppression_ids(target_id, details):
+    """Suppress proven audit aliases, without claiming their nodes were deleted."""
+    ids={target_id} if identifier(target_id) else set()
+    ids.update(node for node in details.get('related_video_ids',[]) if identifier(node))
+    if details.get('operation_scope')=='reel_video' and identifier(details.get('linked_post_id')):
+        ids.add(details['linked_post_id'])
+    return ids
+
+
+def suppression_reservations(page_id,target_id,details):
+    return {page_id+':'+node for node in suppression_ids(target_id,details)}
+
+
 @dataclass
 class Target:
     page_id: str
