@@ -102,7 +102,7 @@ test('single Post requires exact one selection, prepare, manual check and explic
   assert.equal(elements['delete-dialog'].open,false);
 });
 
-test('cancel sends no DELETE execution and Reel remains unsupported', async () => {
+test('cancel sends no DELETE execution and unlinked Reel shows backend rejection', async () => {
   const data=onePostAudit();
   const {elements,requests}=setup([connected,data,preparedPost]);
   await tick();
@@ -116,23 +116,29 @@ test('cancel sends no DELETE execution and Reel remains unsupported', async () =
   assert.equal(elements['delete-dialog'].open,false);
   const reelData=onePostAudit();
   reelData.items[0].kind='Reel';
-  const second=setup([connected,reelData]);
+  reelData.items[0].sources=[{source:'video_reels',object_id:'987'}];
+  const second=setup([connected,reelData,()=>({ok:false,json:async()=>({error:{code:'page_post_missing',message:'Tidak memiliki ID Page Post'}})})]);
   await tick();
   await second.elements['load-posts'].events.click();
   choose(second.elements);
-  assert.equal(second.elements['delete-one'].disabled,true);
+  assert.equal(second.elements['delete-one'].disabled,false);
+  await second.elements['delete-one'].events.click();
+  assert.match(second.elements['delete-status'].textContent,/Tidak memiliki ID Page Post/);
+  assert.notEqual(second.elements['delete-dialog'].open,true);
+  assert.equal(second.requests.length,3);
 });
 
-test('unrecognized Post type cannot enable single delete and expired dialog cannot execute', async () => {
+test('frontend has no subtype rule and expired dialog cannot execute', async () => {
   const data=onePostAudit();
   delete data.items[0].post_status_type;
-  const unknown=setup([connected,data]);
+  const unknown=setup([connected,data,preparedPost]);
   await tick();
   await unknown.elements['load-posts'].events.click();
   choose(unknown.elements);
-  assert.equal(unknown.elements['delete-one'].disabled,true);
+  assert.equal(unknown.elements['delete-one'].disabled,false);
   await unknown.elements['delete-one'].events.click();
-  assert.equal(unknown.requests.length,2);
+  assert.equal(unknown.requests.length,3);
+  assert.equal(unknown.elements['delete-dialog'].open,true);
   const {elements,requests,timers}=setup([connected,onePostAudit(),preparedPost]);
   await tick();
   await elements['load-posts'].events.click();
@@ -145,6 +151,26 @@ test('unrecognized Post type cannot enable single delete and expired dialog cann
   assert.equal(requests.length,3);
   assert.equal(elements['delete-dialog'].open,false);
   assert.match(elements['delete-status'].textContent,/kedaluwarsa/);
+});
+
+test('photo link video and merged Reel labels defer to backend Page Post preview', async () => {
+  for (const kind of ['Foto','Video','Link','Reel','Label lain']) {
+    const data=onePostAudit();
+    data.items[0].kind=kind;
+    data.items[0].post_status_type='anything';
+    const preview={...preparedPost,target:{...preparedPost.target,kind,operation_scope:'page_post',media_deletion_guaranteed:false}};
+    const {elements,requests}=setup([connected,data,preview]);
+    await tick();
+    await elements['load-posts'].events.click();
+    choose(elements);
+    assert.equal(elements['delete-one'].disabled,false,kind);
+    await elements['delete-one'].events.click();
+    assert.equal(elements['delete-dialog'].open,true,kind);
+    const text=elements['delete-details'].children.map(child=>child.textContent).join(' ');
+    assert.match(text,/ID Page Post asli: 11_0/);
+    assert.match(text,/menargetkan Page Post/);
+    assert.equal(requests.length,3);
+  }
 });
 
 test('uncertain retains audit and never repeats DELETE after network loss', async () => {

@@ -2,7 +2,11 @@
 
 MESSAGES = {
     "invalid_single_delete": "Pilih tepat satu key Post audit; ID atau token bebas tidak diterima.",
-    "post_delete_unsupported": "Hanya Post teks dengan jenis yang dikenali, satu identitas asli published_posts, dan link Facebook yang didukung. Muat ulang jika audit lama belum memiliki metadata jenis. Story, Foto, Video, Reel, jenis tidak diketahui, atau identitas ambigu ditolak.",
+    "post_delete_unsupported": "Snapshot target berubah setelah preview. Periksa ulang target sebelum menyiapkan konfirmasi baru.",
+    "page_post_missing": "Konten tidak memiliki ID Page Post asli dari published_posts pada hasil audit. Reel tanpa Page Post terhubung tidak didukung; ID media/Reel tidak dipakai sebagai pengganti.",
+    "post_identity_ambiguous": "Identitas Page Post atau relasi Post/Reel ambigu. Tidak ada target yang ditebak atau ID yang diubah.",
+    "identified_story": "Story teridentifikasi. Target ini tidak dapat dicoba melalui Hapus 1 Post.",
+    "post_permalink_missing": "Permalink Facebook valid tidak tersedia. Pemeriksaan manual target tidak dapat dilakukan.",
     "confirmation_not_found": "Konfirmasi tidak tersedia, sudah kedaluwarsa, atau bukan milik sesi browser ini.",
     "confirmation_expired": "Konfirmasi kedaluwarsa. Periksa kembali target sebelum menyiapkan konfirmasi baru.",
     "confirmation_used": "Konfirmasi sudah digunakan. DELETE tidak dikirim ulang.",

@@ -47,31 +47,47 @@ class SingleDelete:
         if audit is None:
             raise AppError('audit_expired', 409)
         matches = [item for item in audit['items'] if item.get('key') == key]
-        if len(matches) != 1:
+        if not matches:
             raise AppError('invalid_single_delete')
+        if len(matches) != 1:
+            raise AppError('post_identity_ambiguous', 409)
         item = matches[0]
         sources = item.get('sources')
-        if (item.get('page_id') != page_id or item.get('kind') != 'Postingan'
-                or item.get('post_status_type') != 'mobile_status_update'
-                or item.get('identified_story') is True or not isinstance(sources, list) or not sources
-                or any(not isinstance(s, dict) or s.get('source') != 'published_posts' for s in sources)):
-            raise AppError('post_delete_unsupported', 409)
-        nodes = {identifier(s.get('object_id')) for s in sources}
-        if len(nodes) != 1 or None in nodes or item.get('object_id') not in nodes:
-            raise AppError('post_delete_unsupported', 409)
+        if item.get('page_id') != page_id:
+            raise AppError('page_not_owned',403)
+        if item.get('kind') == 'Story' or item.get('identified_story') is True:
+            raise AppError('identified_story',409)
+        if not isinstance(sources,list) or any(not isinstance(s,dict) for s in sources):
+            raise AppError('post_identity_ambiguous',409)
+        if any(s.get('source') == 'stories' for s in sources):
+            raise AppError('identified_story',409)
+        if any(s.get('source') not in {'published_posts','video_reels'} or not identifier(s.get('object_id')) for s in sources):
+            raise AppError('post_identity_ambiguous',409)
+        posts = [s for s in sources if s['source'] == 'published_posts']
+        if not posts:
+            raise AppError('page_post_missing',409)
+        nodes = {s['object_id'] for s in posts}
+        if len(nodes) != 1:
+            raise AppError('post_identity_ambiguous',409)
         node = next(iter(nodes))  # Never synthesize or reformat an ID.
+        reels = [s for s in sources if s['source'] == 'video_reels']
+        if (any(s.get('post_id') != node for s in reels)
+                or item.get('object_id') not in {s['object_id'] for s in sources}):
+            raise AppError('post_identity_ambiguous',409)
+        story_ids = {s['object_id'] for s in sources} | {node}
         for job in self.store.content_jobs.entries.values():
-            if job.page_id == page_id and node in job.story_ids:
-                raise AppError('post_delete_unsupported', 409)
+            if job.page_id == page_id and story_ids.intersection(job.story_ids):
+                raise AppError('identified_story', 409)
         link = safe_url(item.get('permalink'), False, [session.user_token, page.access_token])
         if link is None:
-            raise AppError('post_delete_unsupported', 409)
+            raise AppError('post_permalink_missing', 409)
         name = next(p['name'] for p in session.metadata() if p['id'] == page_id)
         target = {'key': key, 'target_id': node, 'page_id': page_id, 'page_name': name,
-                  'kind': item['kind'], 'text': item.get('text', '')[:500],
+                  'kind': item.get('kind') or 'Jenis tidak tersedia', 'text': item.get('text', '')[:500],
+                  'operation_scope':'page_post', 'media_deletion_guaranteed':False,
                   'published_wib': item.get('published_wib') or 'Tanggal tidak tersedia', 'permalink': link}
         # Snapshot identity/provenance/visible metadata, not tokens or supplied delete IDs.
-        identity = (node, tuple(sorted((s['source'], s['object_id']) for s in sources)),
+        identity = (node, tuple(sorted((s['source'], s['object_id'], s.get('post_id') or '') for s in sources)),
                     target['kind'], target['text'], target['published_wib'], target['permalink'])
         return session, page, target, identity
 
@@ -91,7 +107,7 @@ class SingleDelete:
         self.confirmations[cid] = Confirmation(browser_id, sid, copy.deepcopy(target), identity, expiry)
         return {'confirmation_id': cid, 'expires_in_seconds': max(0, int(expiry-time.monotonic())),
                 'target': target, 'story_automatically_verified': False,
-                'message': 'Periksa link: pastikan ini postingan biasa yang ingin dihapus, bukan Facebook Story. Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.'}
+                'message': 'Periksa permalink: pastikan target adalah Page Post yang ingin dihapus, bukan Facebook Story. Operasi menargetkan Page Post, bukan jaminan menghapus objek foto/video/Reel secara terpisah. Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.'}
 
     async def execute(self, graph, browser_id, sid, payload):
         if (not isinstance(payload, dict) or set(payload) != {'confirmation_id', 'manual_target_confirmed'}

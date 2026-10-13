@@ -91,15 +91,15 @@ class SingleDelete(unittest.IsolatedAsyncioTestCase):
         self.seed()  # A stale load snapshot must not resurrect a deleted target.
         self.assertEqual(self.store.audits.get(self.sid, '11')['items'], [])
 
-    async def test_invalid_selection_story_reel_video_ambiguous_and_missing_link(self):
+    async def test_invalid_selection_story_ambiguous_and_missing_link(self):
         for payload in [{'page_id':'11', 'keys':[item()['key']]*2}, {'page_id':'11', 'keys':['11_123']},
                         {'page_id':'11','keys':[item()['key']],'token':TOKEN}, {'page_id':'22','keys':[item()['key']]},
                         {'page_id':'99','keys':[item()['key']]}]:
             self.assertGreaterEqual((await self.prepare(payload)).status_code, 400)
-        for changes in [{'kind':'Story'}, {'kind':'Reel'}, {'kind':'Video'},
+        for changes in [{'kind':'Story'},
                         {'sources':[{'source':'published_posts','object_id':'11_999'}]},
                         {'sources':[{'source':'published_posts','object_id':'11_123'},{'source':'published_posts','object_id':'11_999'}]},
-                        {'sources':[{'source':'published_posts','object_id':'11_123'},{'source':'video_reels','object_id':'123','post_id':'11_123'}]},
+                        {'sources':[{'source':'published_posts','object_id':'11_123'},{'source':'video_reels','object_id':'123','post_id':'11_999'}]},
                         {'identified_story':True}, {'permalink':'javascript:alert(1)'}]:
             self.audit['items'] = [{**item(), **changes}]
             self.seed()
@@ -235,16 +235,49 @@ class SingleDelete(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.prepare()).json()['error']['code'],'delete_capacity')
         self.assertEqual(self.calls, [])
 
-    async def test_loader_unknown_type_is_auditable_but_not_single_delete_candidate(self):
+    async def test_page_post_subtypes_and_missing_status_use_original_post_id(self):
         from test_content import post
-        for status in [None, 'unrecognized_type', 'added_photos', 'added_video', 'shared_story']:
+        for status in ['mobile_status_update', None, 'unrecognized_type', 'added_photos', 'added_video', 'shared_story']:
             raw = post(123, status_type=status)
             normalized = self.app.state.jobs.loader._normalize(raw, 'published_posts', '11', [])
             normalized.pop('_date')
             self.audit['items'] = [normalized]
             self.seed()
-            self.assertIsNone(normalized['post_status_type'])
-            self.assertEqual((await self.prepare()).json()['error']['code'],'post_delete_unsupported')
+            prepared = await self.prepare()
+            self.assertEqual(prepared.status_code,200,prepared.text)
+            self.assertEqual(prepared.json()['target']['target_id'],'11_123')
+        self.assertEqual(self.calls, [])
+
+    async def test_merged_reel_uses_only_verified_published_post_id_not_media_id(self):
+        self.audit['items'] = [{**item(), 'kind':'Reel', 'object_id':'987',
+            'sources':[{'source':'published_posts','object_id':'11_123'},
+                       {'source':'video_reels','object_id':'987','post_id':'11_123'}]}]
+        self.seed()
+        prepared = await self.prepare()
+        self.assertEqual(prepared.status_code,200,prepared.text)
+        data = prepared.json()
+        self.assertEqual(data['target']['target_id'],'11_123')
+        self.assertEqual(data['target']['operation_scope'],'page_post')
+        self.assertFalse(data['target']['media_deletion_guaranteed'])
+        result = await self.execute(data['confirmation_id'])
+        self.assertEqual(result.json()['outcome'],'succeeded')
+        self.assertEqual(self.calls[0].url.path,'/v26.0/11_123')
+
+    async def test_rejection_reasons_missing_post_ambiguous_story_and_expired_audit(self):
+        cases = [
+            ({'kind':'Reel','object_id':'987','sources':[{'source':'video_reels','object_id':'987'}]}, 'page_post_missing'),
+            ({'sources':[{'source':'video_reels','object_id':'987','post_id':'11_123'}]}, 'page_post_missing'),
+            ({'sources':[{'source':'published_posts','object_id':'11_123'},{'source':'published_posts','object_id':'11_124'}]}, 'post_identity_ambiguous'),
+            ({'kind':'Story'},'identified_story'),
+            ({'identified_story':True},'identified_story'),
+            ({'permalink':None},'post_permalink_missing'),
+        ]
+        for changes, code in cases:
+            self.audit['items'] = [{**item(), **changes}]
+            self.seed()
+            self.assertEqual((await self.prepare()).json()['error']['code'],code)
+        self.store.audits.entries[self.sid].expires_at = time.monotonic()-1
+        self.assertEqual((await self.prepare()).json()['error']['code'],'audit_expired')
         self.assertEqual(self.calls, [])
 
     async def test_session_expiry_after_prepare_and_known_story_ids_rejected(self):
@@ -253,7 +286,7 @@ class SingleDelete(unittest.IsolatedAsyncioTestCase):
         job = ContentJob(self.bid,self.sid,'11',100,self.session.expires_at,self.store.settings)
         job.story_ids.add('11_123')
         self.app.state.jobs.entries[job.id] = job
-        self.assertEqual((await self.execute(cid)).json()['error']['code'],'post_delete_unsupported')
+        self.assertEqual((await self.execute(cid)).json()['error']['code'],'identified_story')
         job.story_ids.clear()
         self.session.expires_at = time.monotonic()-1
         self.assertEqual((await self.execute(cid)).json()['error']['code'],'session_expired')
