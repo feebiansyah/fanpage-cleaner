@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+token
+token.*
+tokens/
+*token*.txt
+*token*.json
+*.log
+*.pid
+*.tmp
+*.sqlite*
+runtime/
+.pytest_cache/

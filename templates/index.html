@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fanpage Cleaner</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+</head>
+<body>
+  <main class="container">
+    <header>
+      <span class="badge">Fondasi aplikasi</span>
+      <h1>Fanpage Cleaner</h1>
+      <p>Kelola konten Fanpage Anda melalui satu halaman.</p>
+    </header>
+
+    <p class="notice" id="availability" role="status">Koneksi Facebook belum tersedia pada tahap ini.</p>
+
+    <section class="card" aria-labelledby="connection-title">
+      <h2 id="connection-title">Koneksi Facebook</h2>
+      <label for="facebook-token">Token Facebook</label>
+      <div class="input-row">
+        <input id="facebook-token" type="password" placeholder="Token akses Facebook" autocomplete="off" spellcheck="false" aria-describedby="token-help availability">
+        <button type="button" disabled aria-describedby="availability">Hubungkan</button>
+      </div>
+      <p class="help" id="token-help">Token tidak dikirim atau disimpan pada tahap ini.</p>
+      <label for="fanpage">Pilihan Fanpage</label>
+      <div class="input-row">
+        <select id="fanpage" disabled aria-describedby="availability">
+          <option value="">Belum ada Fanpage yang terhubung</option>
+        </select>
+        <button type="button" disabled aria-describedby="availability">Load Posts</button>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="content-title">
+      <div class="section-heading">
+        <h2 id="content-title">Daftar konten</h2>
+        <label class="checkbox-label" for="select-all">
+          <input id="select-all" type="checkbox" disabled aria-describedby="availability">
+          Pilih Semua
+        </label>
+      </div>
+      <div class="content-list" aria-label="Daftar konten Fanpage">
+        <p>Belum ada konten yang dimuat.</p>
+        <p class="help">Daftar konten dan checkbox tiap konten akan tersedia setelah koneksi Facebook dibuat.</p>
+      </div>
+      <div class="actions">
+        <button class="danger" type="button" disabled aria-describedby="availability">Hapus Terpilih</button>
+        <button class="secondary" type="button" disabled aria-describedby="availability">Berhenti</button>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="progress-title">
+      <div class="section-heading">
+        <h2 id="progress-title">Progres</h2>
+        <span>0%</span>
+      </div>
+      <progress value="0" max="100" aria-label="Progres operasi">0%</progress>
+      <p class="help" role="status">Belum ada operasi yang berjalan.</p>
+    </section>
+  </main>
+</body>
+</html>
