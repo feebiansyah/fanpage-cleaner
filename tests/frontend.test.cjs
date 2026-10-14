@@ -25,7 +25,7 @@ function setup(responses) {
     'load-posts', 'max-posts', 'content-list', 'select-all', 'selected-count', 'load-status', 'audit-warning', 'local-pagination', 'load-progress',
     'fanpage-search', 'fanpage-search-status', 'source-diagnostics', 'stop-load', 'dry-run', 'dry-status', 'dry-results', 'dry-pagination',
     'delete-one', 'delete-one-reel', 'delete-dialog-title', 'delete-warning', 'delete-manual-text', 'delete-help', 'delete-dialog', 'delete-details', 'delete-manual-check', 'delete-cancel', 'delete-confirm', 'delete-status',
-    'delete-diagnosis', 'delete-read-last', 'delete-selected', 'bulk-dialog', 'bulk-details', 'bulk-manual-check', 'bulk-cancel', 'bulk-confirm', 'bulk-status', 'bulk-results', 'bulk-read'];
+    'delete-diagnosis', 'delete-read-last', 'delete-selected', 'bulk-dialog', 'bulk-details', 'bulk-preview-pagination', 'bulk-pagination', 'bulk-manual-check', 'bulk-cancel', 'bulk-confirm', 'bulk-status', 'bulk-results', 'bulk-read', 'access-post', 'access-post-result'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id === 'fanpage' ? 'select' : 'div')]));
   elements['max-posts'].value = '100';
   const requests = [];
@@ -51,6 +51,47 @@ const disconnected = {connected: false, state: 'disconnected', pages: [], count:
 const connected = {connected: true, pages: [{id: '11', name: '<img onerror=alert(1)>'}], count: 1,
   message: 'Fanpage berhasil dimuat. Load Posts belum tersedia pada tahap ini.'};
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('current audit Post access probe needs no failed delete or confirmation',async()=>{
+  const loaded=audit(1);loaded.items[0].sources=[{source:'published_posts',object_id:'11_0'}];
+  const evidence={request_count:5,request_budget:5,permissions:{pages_manage_posts:'granted'},checks:[],target:{page_name:'Page',target_id:'11_0'},message:'Memeriksa sesi saat ini, bukan token lama.'};
+  const {elements,requests}=setup([connected,loaded,evidence]);
+  await tick();await elements['load-posts'].events.click();choose(elements);
+  assert.equal(elements['access-post'].disabled,false);
+  await elements['access-post'].events.click();
+  assert.equal(requests.at(-1).path,'/api/delete-diagnosis');
+  assert.deepEqual(JSON.parse(requests.at(-1).options.body),{page_id:'11',keys:['published_posts:11_0']});
+  assert.match(JSON.stringify(elements['access-post-result'].children),/saat ini/);
+  assert.equal(requests.filter(r=>r.path.includes('prepare')||r.path.includes('execute')||r.path.includes('confirm')).length,0);
+});
+
+test('audit access double click and stale Page/disconnect response are protected',async()=>{
+  for (const disconnect of [false,true]) {
+    let release;const pending=new Promise(resolve=>{release=resolve;});
+    const loaded=audit(1);loaded.items[0].sources=[{source:'published_posts',object_id:'11_0'}];
+    const status={...connected,pages:[{id:'11',name:'First'},{id:'22',name:'Second'}],count:2};
+    const {elements,requests}=setup([status,loaded,()=>pending,disconnected]);
+    await tick();await elements['load-posts'].events.click();choose(elements);
+    const work=elements['access-post'].events.click();await elements['access-post'].events.click();
+    assert.equal(requests.filter(r=>r.path==='/api/delete-diagnosis').length,1);
+    if (disconnect) await elements.disconnect.events.click();
+    else {elements.fanpage.value='22';elements.fanpage.events.change();}
+    release({request_count:5,request_budget:5,message:'Old Page diagnosis'});await work;
+    assert.equal(elements['access-post-result'].children.length,0);
+    assert.equal(elements['access-post'].disabled,true);
+  }
+});
+
+test('audit access requires one selected candidate with published Post provenance',async()=>{
+  const loaded=audit(2);loaded.items[0].sources=[{source:'video_reels',object_id:'99'}];
+  loaded.items[1].sources=[{source:'published_posts',object_id:'11_1'}];
+  const {elements,requests}=setup([connected,loaded]);
+  await tick();await elements['load-posts'].events.click();choose(elements);
+  assert.equal(elements['access-post'].disabled,true);
+  elements['select-all'].checked=true;elements['select-all'].events.change();
+  assert.equal(elements['access-post'].disabled,true);
+  await elements['access-post'].events.click();assert.equal(requests.length,2);
+});
 
 test('safe deletion diagnosis distinguishes uncertain causes and hides old dry report', async () => {
   for (const reason of ['timeout_after_send','network_after_send','response_unverified','interrupted','internal_error']) {
@@ -748,6 +789,101 @@ const bulkPreview = {confirmation_id:'bulk-cid',expires_in_seconds:60,selected:2
     {supported:false,page_id:'11',page_name:'Original Page',key:'published_posts:11_1',kind:'Story',reason:'identified_story',message:'Story ditolak'}]};
 const bulkJob = {job_id:'bulk-job',terminal:true,state:'completed',selected:2,total:1,duplicates:0,completed:1,succeeded:1,pages:[{page_id:'11',name:'Original Page'}],
   counts:{queued:0,processing:0,succeeded:1,failed:0,uncertain:0,blocked:0,cancelled:0},items:[{page_id:'11',key:'published_posts:11_0',delete_target:'11_0',status:'succeeded',reasons:['success_boolean_true'],details:bulkPreview.items[0],diagnostic:{http_status:200,raw_body:'secret-token'}}]};
+test('large confirmation preview pages fifty local targets without another request',async()=>{
+  const preview={...bulkPreview,selected:5000,supported:5000,unsupported:0,max_targets:5000,expires_in_seconds:600,
+    items:Array.from({length:5000},(_,i)=>({...bulkPreview.items[0],key:`target:${i}`}))};
+  const {elements,requests}=setup([connected,audit(1),preview]);
+  await tick();await elements['load-posts'].events.click();choose(elements);
+  await elements['delete-selected'].events.click();
+  assert.equal(elements['bulk-details'].children.length,51);
+  assert.match(elements['bulk-details'].children[0].textContent,/5000/);
+  const before=requests.length;
+  elements['bulk-preview-pagination'].children.at(-1).events.click();
+  assert.equal(requests.length,before);
+  assert.match(elements['bulk-details'].children[1].children[0].textContent,/target:50/);
+});
+test('terminal queue drains compact changes and removes successes outside visible result page',async()=>{
+  const initial={...bulkJob,items:[],revision:101,next_revision:100,has_more_changes:true,
+    changes:[{...bulkJob.items[0],key:'published_posts:11_1',delete_target:'11_1'}]};
+  const final={...initial,next_revision:101,has_more_changes:false,changes:[bulkJob.items[0]]};
+  const {elements,requests,timers}=setup([connected,audit(2),bulkPreview,initial,final]);
+  await tick();await elements['load-posts'].events.click();choose(elements);
+  await elements['delete-selected'].events.click();elements['bulk-manual-check'].checked=true;
+  await elements['bulk-confirm'].events.click();
+  assert.equal(elements['content-list'].children.length,1);
+  await timers.filter(t=>t.delay===1000).at(-1).fn();
+  assert.equal(requests.at(-1).path,'/api/bulk-delete/jobs/bulk-job?offset=0&since=100');
+  assert.equal(elements['content-list'].children.length,0);
+});
+test('result pagination reads local offset and revision while keeping fifty visible rows',async()=>{
+  const first={...bulkJob,selected:5000,total:5000,revision:5000,next_revision:5000,changes:[],items:Array.from({length:50},(_,i)=>({...bulkJob.items[0],key:`target:${i}`,status:'uncertain'}))};
+  const next={...first,offset:50,items:[{...bulkJob.items[0],key:'target:50',status:'failed'}]};
+  const {elements,requests}=setup([connected,{jobs:[],last_job:first},next]);
+  await tick();await elements['bulk-read'].events.click();
+  assert.equal(elements['bulk-results'].children.length,50);
+  await elements['bulk-pagination'].children.at(-1).events.click();
+  assert.equal(requests.at(-1).path,'/api/bulk-delete/jobs/bulk-job?offset=50&since=5000');
+  assert.match(elements['bulk-results'].children[0].children[0].textContent,/Gagal/);
+  assert.equal(requests.at(-1).options.method,undefined);
+});
+test('reset snapshot applies compact successes and resumes at current revision',async()=>{
+  const first={...bulkJob,terminal:false,state:'running',revision:5,next_revision:2,changes:[],items:[]};
+  const reset={...bulkJob,terminal:false,state:'running',reset_required:true,revision:10,next_revision:3,changes:[bulkJob.items[0]],items:[]};
+  const last={...bulkJob,revision:10,next_revision:10,changes:[],items:[]};
+  const {elements,requests,timers}=setup([connected,audit(1),bulkPreview,first,reset,last]);
+  await tick();await elements['load-posts'].events.click();choose(elements);
+  await elements['delete-selected'].events.click();elements['bulk-manual-check'].checked=true;await elements['bulk-confirm'].events.click();
+  await timers.filter(t=>t.delay===1000).at(-1).fn();
+  assert.equal(elements['content-list'].children.length,0);
+  await timers.filter(t=>t.delay===1000).at(-1).fn();
+  assert.equal(requests.at(-1).path,'/api/bulk-delete/jobs/bulk-job?offset=0&since=10');
+});
+test('Stop stays hidden while idle and appears only during an active queue',async()=>{
+  const running={...bulkJob,terminal:false,state:'running',items:[]};
+  const {elements}=setup([connected,{jobs:[running]}, { ...bulkJob,items:[] }]);
+  await tick();assert.equal(elements['stop-load'].hidden,true);
+  await elements['bulk-read'].events.click();assert.equal(elements['stop-load'].hidden,false);
+  await elements['stop-load'].events.click();assert.equal(elements['stop-load'].hidden,true);
+});
+test('queue cooldown and failed or uncertain alias outcomes remain clear on loaded audit rows',async()=>{
+  const loaded=onePostAudit(3);
+  loaded.items[1].sources=[{source:'video_reels',object_id:'99'}];
+  const changes=[{...bulkJob.items[0],status:'failed'},
+    {...bulkJob.items[0],key:'reel:99',delete_target:'99',status:'uncertain',details:{operation_scope:'reel_video',related_video_ids:['99']}}];
+  const running={...bulkJob,terminal:false,state:'cooldown',cooldown_seconds:7,items:[],changes,revision:2,next_revision:2};
+  const reset={...bulkJob,reset_required:true,revision:3,changes:[{...bulkJob.items[0],key:loaded.items[2].key,delete_target:'11_2'}],items:[]};
+  const {elements,timers}=setup([connected,loaded,bulkPreview,running,reset]);
+  await tick();await elements['load-posts'].events.click();choose(elements);
+  await elements['delete-selected'].events.click();elements['bulk-manual-check'].checked=true;await elements['bulk-confirm'].events.click();
+  assert.match(elements['bulk-status'].textContent,/Jeda API 7 detik/);
+  assert.match(JSON.stringify(elements['content-list'].children[0]),/Penghapusan: Gagal/);
+  assert.match(JSON.stringify(elements['content-list'].children[1]),/Penghapusan: Belum pasti/);
+  await timers.filter(t=>t.delay===1000).at(-1).fn();
+  assert.equal(elements['content-list'].children.length,2);
+  assert.match(JSON.stringify(elements['content-list'].children[0]),/Penghapusan: Gagal/);
+  assert.match(JSON.stringify(elements['content-list'].children[1]),/Penghapusan: Belum pasti/);
+});
+test('expired session during local queue polling clears results and asks for reconnect',async()=>{
+  const running={...bulkJob,terminal:false,state:'running',items:[]};
+  const {elements,requests,timers}=setup([connected,{jobs:[running]},()=>({ok:false,json:async()=>({error:{code:'session_expired',message:'Sesi kedaluwarsa.'}})}),disconnected]);
+  await tick();await elements['bulk-read'].events.click();
+  await timers.filter(t=>t.delay===1000).at(-1).fn();
+  assert.equal(requests.at(-1).path,'/api/session');
+  assert.equal(elements['bulk-results'].children.length,0);
+  assert.equal(elements['stop-load'].hidden,true);
+  assert.match(elements['operation-status'].textContent,/Hubungkan kembali/);
+});
+test('template puts optional tools in closed additional section and leaves main queue status empty',()=>{
+  const html=fs.readFileSync('templates/index.html','utf8');
+  const additional=html.indexOf('<details><summary>Alat tambahan</summary>');
+  const end=html.indexOf('</section>',additional);
+  assert.ok(additional>0);
+  for (const id of ['bulk-read','access-post','delete-one','delete-one-reel','delete-read-last','dry-run']) {
+    const pos=html.indexOf(`id="${id}"`);assert.ok(pos>additional && pos<end,id);
+  }
+  assert.match(html,/<p id="bulk-status"[^>]*><\/p>/);
+  assert.match(html,/Maksimal 5000 target/);
+});
 test('mixed bulk preview identifies Reel media and success removes its linked Post alias',async()=>{
   const loaded=audit(3);
   loaded.items[0].sources=[{source:'published_posts',object_id:'11_0'}];
@@ -805,7 +941,7 @@ test('bulk active job survives Page change and stop drains processing through lo
   assert.equal(requests.filter(r=>r.path.endsWith('/stop')).length,0);
   await elements['stop-load'].events.click();assert.equal(elements['stop-load'].disabled,false);
   const timer=timers.filter(t=>t.delay===1000).at(-1);await timer.fn();
-  assert.equal(requests.at(-1).path,'/api/bulk-delete/jobs/bulk-job');
+  assert.equal(requests.at(-1).path,'/api/bulk-delete/jobs/bulk-job?offset=0&since=0');
   assert.equal(elements['stop-load'].disabled,true);assert.equal(elements['content-list'].children.length,0);
 });
 test('lost bulk confirmation is never retried and recovers real job with local active read',async()=>{

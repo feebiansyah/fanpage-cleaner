@@ -66,6 +66,62 @@ class FailureDiagnosis(unittest.IsolatedAsyncioTestCase):
         return await self.client.post('/api/delete-diagnosis',headers=HEADERS,
             json={'job_id':self.job.id,'key':'published_posts:11_123',**changes})
 
+    async def inspect_audit(self,**changes):
+        return await self.client.post('/api/delete-diagnosis',headers=HEADERS,
+            json={'page_id':'11','keys':['published_posts:11_123'],**changes})
+
+    async def test_current_audit_post_without_previous_delete_or_confirmation(self):
+        self.app.state.bulk.jobs.clear()
+        self.app.state.bulk_delete.confirmations.clear()
+        self.app.state.single_delete.confirmations.clear()
+        self.app.state.single_delete.last_results.clear()
+        self.store.audits.entries[self.sid].data['items'][0]['permalink']=None
+        response=await self.inspect_audit()
+        self.assertEqual(response.status_code,200,response.text)
+        data=response.json()
+        self.assertEqual(data['target']['target_id'],'11_123')
+        self.assertEqual(data['diagnosis_origin'],'current_audit')
+        self.assertEqual(data['request_count'],5)
+        self.assertFalse(data['delete_permission_proven'])
+        self.assertIn('saat ini',data['message'])
+        self.assertEqual(self.app.state.single_delete.confirmations,{})
+        self.assertEqual(self.app.state.bulk_delete.confirmations,{})
+        self.assertEqual(self.app.state.bulk.jobs,{})
+
+    async def test_current_audit_invalid_payload_expired_and_foreign_ownership(self):
+        for changes in ({'keys':[]},{'keys':['published_posts:11_123']*2},{'target_id':'11_123'},
+                        {'access_token':PAGE},{'page_id':'22'},{'keys':['unknown']}):
+            self.assertGreaterEqual((await self.inspect_audit(**changes)).status_code,400)
+        self.store.audits.entries[self.sid].expires_at=time.monotonic()-1
+        self.assertEqual((await self.inspect_audit()).json()['error']['code'],'audit_expired')
+        self.assertEqual(self.calls,[])
+
+    async def test_current_audit_reel_story_and_ambiguous_not_used_as_post(self):
+        entry=self.store.audits.entries[self.sid]
+        original=copy.deepcopy(entry.data['items'][0])
+        for changes in ({'sources':[{'source':'video_reels','object_id':'555'}],'object_id':'555'},
+                        {'identified_story':True},
+                        {'sources':[{'source':'published_posts','object_id':'11_123'},{'source':'published_posts','object_id':'11_124'}]}):
+            entry.data['items']=[{**original,**changes}]
+            self.assertGreaterEqual((await self.inspect_audit()).status_code,400)
+        self.assertEqual(self.calls,[])
+
+    async def test_current_audit_merged_uses_original_post_not_media_and_new_session_isolated(self):
+        entry=self.store.audits.entries[self.sid]
+        entry.data['items'][0].update(object_id='555',sources=[
+            {'source':'published_posts','object_id':'11_123'},
+            {'source':'video_reels','object_id':'555','post_id':'11_123'}])
+        data=(await self.inspect_audit()).json()
+        self.assertEqual(data['target']['target_id'],'11_123')
+        self.assertTrue(all('/555' not in str(request.url) for request in self.calls))
+        self.assertTrue(all(request.method=='GET' for request in self.calls))
+        bid,_,_=self.store.bootstrap(None)
+        sid,_=self.store.replace(bid,'new-session-user',[Page('11','Page','new-session-page')])
+        self.client.cookies.set('fanpage_browser',bid)
+        self.client.cookies.set('fanpage_session',sid)
+        self.assertEqual((await self.inspect_audit()).json()['error']['code'],'audit_expired')
+        self.assertEqual(len(self.calls),5)
+
     async def test_permissions_tasks_owner_and_proven_photo_relation_get_only(self):
         response=await self.diagnose()
         self.assertEqual(response.status_code,200,response.text)

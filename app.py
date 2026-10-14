@@ -70,20 +70,21 @@ def check_origin(request: Request, settings: Settings, mutation=False):
         raise AppError("origin_denied", 403)
 
 
-async def read_json(request: Request, settings: Settings):
+async def read_json(request: Request, settings: Settings, max_bytes=None):
+    max_bytes=settings.max_body_bytes if max_bytes is None else max_bytes
     length = request.headers.get("content-length")
     if length is not None:
         try:
             size = int(length)
         except ValueError:
             raise AppError("bad_request") from None
-        if size < 0 or size > settings.max_body_bytes:
+        if size < 0 or size > max_bytes:
             raise AppError("body_too_large", 413)
     if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
         raise AppError("bad_request")
     body = bytearray()
     async for chunk in request.stream():
-        if len(body) + len(chunk) > settings.max_body_bytes:
+        if len(body) + len(chunk) > max_bytes:
             raise AppError("body_too_large", 413)
         body.extend(chunk)
     try:
@@ -385,7 +386,11 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
 
     @application.post('/api/bulk-delete/prepare')
     async def prepare_bulk_delete(request: Request):
-        payload=await single_delete_body(request)
+        check_origin(request,settings,mutation=True)
+        try:
+            payload=await asyncio.wait_for(read_json(request,settings,min(settings.dry_body_bytes,1048576)),settings.connect_timeout)
+        except asyncio.TimeoutError:
+            raise AppError('timeout',504) from None
         return application.state.bulk_delete.prepare(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload)
 
     failure_diagnosis=FailureDiagnosis(application.state.store,application.state.bulk_delete,application.state.single_delete)
@@ -410,8 +415,12 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         return application.state.bulk_delete.owned(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),job_id)
 
     @application.get('/api/bulk-delete/jobs/{job_id}')
-    async def real_bulk_status(request: Request,job_id: str):
-        return application.state.bulk.snapshot(owned_real(request,job_id))
+    async def real_bulk_status(request: Request,job_id: str,offset: int=0,since: int | None=None):
+        if offset<0 or offset>settings.bulk_delete_max_targets or (since is not None and since<0):
+            raise AppError('invalid_selection')
+        job=owned_real(request,job_id)
+        if since is not None and since>job.revision: raise AppError('invalid_selection')
+        return application.state.bulk.snapshot(job,offset,since=since)
 
     @application.post('/api/bulk-delete/jobs/{job_id}/stop')
     async def real_bulk_stop(request: Request,job_id: str):

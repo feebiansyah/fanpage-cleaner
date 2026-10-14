@@ -1,5 +1,6 @@
 """Bounded process-wide queue: Page fairness and canonical-target locks."""
 import asyncio
+import math
 import time
 import uuid
 from collections import deque
@@ -28,6 +29,9 @@ class DryJob:
     state: str = 'queued'
     events: deque = field(default_factory=deque)
     active: dict = field(default_factory=dict,repr=False)
+    revision: int = 0
+    changes: deque = field(default_factory=lambda:deque(maxlen=10000),repr=False)
+    published_status: list = field(default_factory=list,repr=False)
 
     @property
     def terminal(self):
@@ -75,6 +79,7 @@ class BulkQueue:
                         target.status='blocked'
                         if 'checkpoint_failed' not in target.reasons: target.reasons.append('checkpoint_failed')
                 self._cancel_unsent(job)
+                self.publish_changes(job)
                 raise AppError('checkpoint_failed',503) from None
             job.state='failed'
             for target in job.targets:
@@ -83,6 +88,18 @@ class BulkQueue:
                     target.reasons=list(dict.fromkeys(target.reasons+['checkpoint_failed']))
             for task in job.active.values(): task.cancel()
             raise AppError('checkpoint_failed',503) from None
+        self.publish_changes(job,index)
+
+    def publish_changes(self,job,index=None):
+        if job.mode!='delete_page_posts': return
+        if not job.published_status: job.published_status=['queued']*len(job.targets)
+        indices=range(len(job.targets)) if index is None else (index,)
+        for number in indices:
+            status=job.targets[number].status
+            if status!=job.published_status[number]:
+                job.revision+=1
+                job.changes.append((job.revision,number))
+                job.published_status[number]=status
 
     def sync_sessions(self):
         now=time.monotonic()
@@ -129,7 +146,12 @@ class BulkQueue:
         if self.stopping or not targets:
             raise AppError('invalid_selection')
         total=sum(len(j.targets) for j in self.jobs.values())+len(targets)
-        size=sum(len(j.targets)*(4096 if j.mode=='delete_page_posts' else 2048) for j in self.jobs.values())+len(targets)*(4096 if mode=='delete_page_posts' else 2048)
+        size=sum(len(j.targets)*(8192 if j.mode=='delete_page_posts' else 2048) for j in self.jobs.values())+len(targets)*(8192 if mode=='delete_page_posts' else 2048)
+        preview_capacity=getattr(self,'preview_capacity',None)
+        if preview_capacity is not None:
+            preview_count,preview_bytes=preview_capacity(targets if mode=='delete_page_posts' else None)
+            total+=preview_count
+            size+=preview_bytes
         if len(self.jobs)>=self.settings.dry_max_jobs or total>self.settings.dry_max_targets or size>self.settings.dry_max_bytes:
             raise AppError('dry_capacity',503)
         owner=self.owners.setdefault(sid,uuid.uuid4().hex)
@@ -260,15 +282,33 @@ class BulkQueue:
         self.persist(job)
         self.changed.set()
 
-    def snapshot(self,job,offset=0):
+    def snapshot(self,job,offset=0,*,since=None):
         if job.mode=='delete_page_posts':
             counts={s:sum(t.status==s for t in job.targets) for s in ('queued','processing','succeeded','failed','uncertain','blocked','cancelled')}
+            def compact(target):
+                return {'page_id':target.page_id,'key':target.key,'delete_target':target.delete_target,'status':target.status,
+                        'details':{k:target.details.get(k) for k in ('operation_scope','related_video_ids','linked_post_id')}}
+            reset=since is not None and bool(job.changes) and since<job.changes[0][0]-1
+            if since is None or reset:
+                changes=[compact(t) for t in job.targets if t.status in {'succeeded','failed','uncertain','blocked','cancelled'}]
+                next_revision=job.revision
+                more=False
+            else:
+                updates=[(revision,index) for revision,index in job.changes if revision>since][:100]
+                changes=[compact(job.targets[index]) for _,index in updates]
+                next_revision=updates[-1][0] if updates else job.revision
+                more=next_revision<job.revision
+            cooldown=max(0,self.store.global_cooldown_until-time.monotonic(),
+                max((self.store.token_cooldowns.get(t.scope,0)-time.monotonic() for t in job.targets if t.status in {'queued','processing'}),default=0))
             return {'job_id':job.id,'mode':job.mode,'state':job.state,'terminal':job.terminal,
                     'total':len(job.targets),'selected':len(job.targets)+job.duplicates+job.unsupported,'duplicates':job.duplicates,'unsupported':job.unsupported,
                     'counts':counts,'completed':len(job.targets)-counts['queued']-counts['processing'],
                     'succeeded':counts['succeeded'],'manual_targets_confirmed':True,'story_automatically_verified':False,
                     'pages':[{'page_id':pid,'name':name} for pid,name in job.pages.items()],
-                    'items':[{**t.public(),'details':dict(t.details),'diagnostic':dict(t.diagnostic),'cleanup_warning':t.cleanup_warning} for t in job.targets],
+                    'items':[{**t.public(),'details':dict(t.details),'diagnostic':dict(t.diagnostic),'cleanup_warning':t.cleanup_warning} for t in job.targets[offset:offset+50]],
+                    'offset':offset,'page_size':50,'result_total':len(job.targets),
+                    'revision':job.revision,'next_revision':next_revision,'changes':changes,'has_more_changes':more,'reset_required':reset,
+                    'cooldown_seconds':math.ceil(cooldown),
                     'stop_reason':job.stop_reason,'message':'Operasi menargetkan ID Post atau video/Reel asli sesuai snapshot; sukses mensyaratkan respons Meta yang ketat.'}
         targets=job.targets
         return {'job_id':job.id,'mode':'dry_run','state':job.state,'terminal':job.terminal,

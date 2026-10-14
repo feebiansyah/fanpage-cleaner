@@ -55,7 +55,8 @@ class Settings:
     max_audit_bytes: int = 67108864
     max_audit_pages: int = 200
     dry_workers: int = 2
-    bulk_delete_max_targets: int = 20
+    bulk_delete_max_targets: int = 5000
+    bulk_confirmation_ttl: int = 600
     delete_permission_threshold: int = 3
     delete_permission_window: float = 60
     graph_request_concurrency: int = 2
@@ -75,8 +76,10 @@ class Settings:
     def __post_init__(self):
         if type(self.delete_permission_threshold) is not int or not 1 <= self.delete_permission_threshold <= 20:
             raise ValueError('Ambang circuit breaker harus bilangan bulat 1–20.')
-        if type(self.bulk_delete_max_targets) is not int or not 1 <= self.bulk_delete_max_targets <= 20:
-            raise ValueError('Batas uji bulk harus bilangan bulat 1–20; bukan batas Meta.')
+        if type(self.bulk_delete_max_targets) is not int or not 1 <= self.bulk_delete_max_targets <= 5000:
+            raise ValueError('Batas bulk harus bilangan bulat 1–5000; bukan batas Meta.')
+        if type(self.bulk_confirmation_ttl) is not int or not 60 <= self.bulk_confirmation_ttl <= 900:
+            raise ValueError('TTL konfirmasi bulk harus 60–900 detik dan tetap dibatasi sesi.')
         if not re.fullmatch(r"v[1-9][0-9]?\.0", self.graph_version):
             raise ValueError("GRAPH_VERSION harus berformat v26.0.")
         parsed = urlsplit(self.app_origin)

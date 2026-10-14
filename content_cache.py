@@ -90,7 +90,13 @@ class AuditCache:
         entry = self.pages.get((sid,page_id)) or self.entries.get(sid)
         if not entry or entry.expires_at <= time.monotonic() or entry.data["page_id"] != page_id:
             return None
-        return {**self.filter_removed(entry.data), "cache_ttl_seconds": max(0, int(entry.expires_at - time.monotonic()))}
+        filtered=self.filter_removed(entry.data)
+        if filtered is not entry.data:
+            # Compact on a local read, not by scanning/encoding the entire Page
+            # after every individual DELETE in a 5000-target batch.
+            entry.data=filtered
+            entry.size=len(json.dumps(filtered,ensure_ascii=False).encode('utf-8'))
+        return {**entry.data, "cache_ttl_seconds": max(0, int(entry.expires_at - time.monotonic()))}
 
     def is_removed(self, item, page_id):
         identities = {item.get('object_id')}
@@ -115,10 +121,8 @@ class AuditCache:
     def invalidate_post(self, page_id, target_id):
         # Kept longer than any session/audit/load snapshot; bounded before dispatch.
         self.removed_posts[(page_id, target_id)] = time.monotonic()+self.settings.session_ttl+self.settings.audit_ttl
-        for entry in self._all_entries():
-            if entry.data['page_id'] == page_id:
-                entry.data = self.filter_removed(entry.data)
-                entry.size = len(json.dumps(entry.data, ensure_ascii=False).encode('utf-8'))
+        # Every read and stale snapshot restore filters these tombstones. Raw
+        # cache accounting stays conservative until the next read/TTL cleanup.
 
     def discard(self, sid):
         self.entries.pop(sid, None)

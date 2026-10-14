@@ -41,7 +41,7 @@
       </div>
       <label for="max-posts" class="limit-label">Maksimal postingan</label>
       <input id="max-posts" type="number" value="100" min="1" max="5000" step="1" inputmode="numeric" aria-describedby="posts-help">
-      <p class="help" id="posts-help">Muat konten, pilih yang ingin dihapus, lalu periksa daftar sebelum konfirmasi. Maksimal 20 target per penghapusan.</p>
+      <p class="help" id="posts-help">Muat konten, pilih yang ingin dihapus, lalu periksa daftar sebelum satu konfirmasi. Maksimal 5000 target per penghapusan.</p>
     </section>
 
     <section class="card" aria-labelledby="content-title">
@@ -65,10 +65,17 @@
       <nav id="local-pagination" class="local-pagination" aria-label="Halaman daftar audit lokal"></nav>
       <div class="actions">
         <button id="delete-selected" class="danger" type="button" disabled>Hapus Terpilih</button>
-        <button id="bulk-read" class="secondary" type="button" disabled>Baca Antrean Penghapusan</button>
-        <button id="stop-load" class="secondary" type="button" disabled aria-describedby="load-status">Berhenti</button>
+        <button id="stop-load" class="secondary" type="button" disabled hidden aria-describedby="load-status">Berhenti</button>
       </div>
-      <details><summary>Alat diagnosis</summary>
+      <p id="bulk-status" class="help" role="status" aria-live="polite"></p>
+      <div id="bulk-results" class="help"></div>
+      <nav id="bulk-pagination" class="local-pagination" aria-label="Halaman hasil penghapusan lokal"></nav>
+      <details><summary>Alat tambahan</summary>
+      <div class="actions">
+        <button id="bulk-read" class="secondary" type="button" disabled>Baca Antrean Penghapusan</button>
+        <button id="access-post" class="secondary" type="button" disabled>Periksa Akses Post</button>
+      </div>
+      <div id="access-post-result" class="help" role="status" aria-live="polite"></div>
       <div class="actions">
         <button id="delete-one" class="danger" type="button" disabled>Hapus 1 Post</button>
         <button id="delete-one-reel" class="danger" type="button" disabled>Uji Hapus 1 Reel</button>
@@ -79,15 +86,13 @@
       <details><summary>Detail hasil penghapusan</summary>
       <div id="delete-diagnosis" class="help" role="status" aria-live="polite" aria-label="Diagnosis aman hasil hapus"></div>
       </details>
-      </details>
-      <p id="bulk-status" class="help" role="status" aria-live="polite">Antrean penghapusan belum berjalan.</p>
-      <div id="bulk-results" class="help"></div>
       <details><summary>Pemeriksaan lokal (Dry Run)</summary>
       <button id="dry-run" type="button" disabled>Jalankan Dry Run</button>
       <p class="help">Pemeriksaan ini tidak menghapus konten.</p>
       <p id="dry-status" class="help" role="status" aria-live="polite">Dry run belum berjalan. Tidak ada penghapusan nyata.</p>
       <div id="dry-results" class="help" aria-label="Hasil pemeriksaan target dry run"></div>
       <nav id="dry-pagination" class="local-pagination" aria-label="Halaman hasil dry run lokal"></nav>
+      </details>
       </details>
     </section>
 
@@ -117,6 +122,7 @@
 <dialog id="bulk-dialog" aria-labelledby="bulk-title">
     <h2 id="bulk-title">Konfirmasi Hapus Terpilih</h2>
     <div id="bulk-details"></div>
+    <nav id="bulk-preview-pagination" class="local-pagination" aria-label="Halaman daftar konfirmasi lokal"></nav>
     <p class="notice">Penghapusan tidak dapat dibatalkan. Hanya subset yang didukung di bawah ini akan dikirim.</p>
     <label class="checkbox-label"><input id="bulk-manual-check" type="checkbox">Saya sudah memeriksa seluruh link dan daftar target yang didukung, memastikan semuanya Post atau Reel yang ingin dihapus dan bukan Story. Ini pemeriksaan manual; pengecualian Story otomatis belum lengkap.</label>
     <div class="actions"><button id="bulk-cancel" type="button" class="secondary">Batal</button><button id="bulk-confirm" type="button" class="danger" disabled>Konfirmasi Hapus Terpilih</button></div>

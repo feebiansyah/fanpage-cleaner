@@ -11,7 +11,7 @@ MESSAGES = {
     'permission_circuit_open': 'Pengiriman pada Page/token ini dijeda setelah penolakan berulang. Ini bukan bukti seluruh Page kehilangan izin. Target belum dikirim perlu konfirmasi pekerjaan baru setelah jeda.',
     "timeout_before_send": "Batas waktu habis sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.",
     "network_before_send": "Transport gagal sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.",
-    "bulk_limit": "Batas uji lokal penghapusan bulk maksimal 20 pilihan per konfirmasi (atau batas konfigurasi yang lebih kecil). Ini bukan batas Meta.",
+    "bulk_limit": "Batas lokal bulk maksimal 5000 pilihan per konfirmasi (atau batas konfigurasi yang lebih kecil). Ini bukan batas Meta.",
     "bulk_confirmation_not_found": "Konfirmasi bulk tidak tersedia atau bukan milik sesi browser ini.",
     "bulk_no_supported_targets": "Tidak ada Post/Reel yang didukung pada snapshot ini. Tidak ada penghapusan dikirim.",
     "bulk_job_not_found": "Pekerjaan penghapusan tidak tersedia pada sesi browser ini.",

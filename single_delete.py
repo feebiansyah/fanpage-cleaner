@@ -57,14 +57,14 @@ class SingleDelete:
         self.store.require_page(browser_id,sid,record['result']['target']['page_id'])
         return copy.deepcopy(record)
 
-    def resolve(self, browser_id, sid, page_id, key, operation_scope='page_post'):
+    def resolve(self, browser_id, sid, page_id, key, operation_scope='page_post', *, audit_context=None):
         session, page = self.store.require_page(browser_id, sid, page_id)
         if not page.access_token:
             raise AppError('page_token_missing', 403)
-        audit = self.store.audits.get(sid, page_id)
+        audit = audit_context[0] if audit_context is not None else self.store.audits.get(sid, page_id)
         if audit is None:
             raise AppError('audit_expired', 409)
-        matches = [item for item in audit['items'] if item.get('key') == key]
+        matches = audit_context[1].get(key,[]) if audit_context is not None else [item for item in audit['items'] if item.get('key') == key]
         if not matches:
             raise AppError('invalid_single_delete')
         if len(matches) != 1:

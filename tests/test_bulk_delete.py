@@ -285,14 +285,16 @@ class BulkDelete(unittest.IsolatedAsyncioTestCase):
             if request.method == 'GET':
                 return httpx.Response(200, json={'data': []})
             self.assertEqual(request.method, 'DELETE')
-            self.assertIn(request.url.path, {'/v26.0/'+node for node in self.allowed})
+            self.assertTrue(request.url.path.startswith('/v26.0/'))
+            self.assertIn(request.url.path.removeprefix('/v26.0/'), self.allowed)
             self.assertEqual(request.url.query, b'')
             self.assertIn(request.headers['authorization'], ['Bearer '+TOKEN, 'Bearer '+OTHER_TOKEN])
             response = self.responses.get(request.url.path.rsplit('/', 1)[-1], self.response)
             if isinstance(response, Exception):
                 raise response
             return await response(request) if callable(response) else response
-        self.app = create_app(Settings(graph_request_interval=.005,cooldown_seconds=.1), httpx.MockTransport(handler),
+        self.app = create_app(Settings(graph_request_interval=.005,cooldown_seconds=.1,
+                              bulk_delete_max_targets=getattr(self, 'max_targets', 20)), httpx.MockTransport(handler),
                               checkpoint_root=Path(self.temp.name))
         self.lifecycle = self.app.router.lifespan_context(self.app)
         await self.lifecycle.__aenter__()
@@ -379,9 +381,9 @@ class BulkDelete(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.json()['supported'], 2)
         self.assertEqual((await self.confirm(prepared.json()['confirmation_id'], target_id='11_30')).status_code, 400)
         self.assertEqual(self.calls, [])
-        self.assertEqual(Settings().bulk_delete_max_targets, 20)
+        self.assertEqual(Settings().bulk_delete_max_targets, 5000)
         with self.assertRaises(ValueError):
-            Settings(bulk_delete_max_targets=21)
+            Settings(bulk_delete_max_targets=5001)
 
     async def test_owned_preview_explicit_unsupported_and_immutable_snapshot(self):
         items = [post(1), post(2, kind='Story'),

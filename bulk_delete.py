@@ -7,7 +7,9 @@ from dataclasses import dataclass,field
 from bulk_targets import Target, identity_locks
 from content import identifier
 from errors import AppError, MESSAGES
-from single_delete import CONFIRMATION_TTL, MAX_CONFIRMATIONS, MAX_PER_SESSION
+from single_delete import MAX_CONFIRMATIONS, MAX_PER_SESSION
+
+PREVIEW_BYTES_PER_TARGET=8192
 
 
 @dataclass
@@ -26,6 +28,12 @@ class BulkDelete:
     def __init__(self,store,queue,single):
         self.store,self.queue,self.single=store,queue,single
         self.confirmations={}
+        self.queue.preview_capacity=self.preview_capacity
+
+    def preview_capacity(self,transferred=None):
+        self.cleanup()
+        count=sum(len(c.targets) for c in self.confirmations.values() if c.targets is not transferred)
+        return count,count*PREVIEW_BYTES_PER_TARGET
 
     def cleanup(self):
         for cid,entry in list(self.confirmations.items()):
@@ -51,17 +59,27 @@ class BulkDelete:
         if session is None: raise AppError('session_expired',401)
         if len(self.confirmations)>=MAX_CONFIRMATIONS or sum(c.session_id==sid and c.job_id is None for c in self.confirmations.values())>=MAX_PER_SESSION:
             raise AppError('delete_capacity',503)
+        preview_count=sum(len(c.targets) for c in self.confirmations.values())
+        job_count=sum(len(j.targets) for j in self.queue.jobs.values())
+        if (preview_count+total+job_count>self.store.settings.dry_max_targets
+            or (preview_count+total)*PREVIEW_BYTES_PER_TARGET+job_count*8192>self.store.settings.dry_max_bytes):
+            raise AppError('delete_capacity',503)
         # Resolve media candidates first across all groups: proven Post aliases
         # must not win simply because their checkbox appeared earlier.
         ordered=[]
+        contexts={}
         for group in groups:
             _,page=self.store.require_page(browser_id,sid,group['page_id'])
-            audit=self.store.audits.get(sid,page.id)
-            if audit is None: raise AppError('audit_expired',409)
-            index={i['key']:i for i in audit['items']}
+            if page.id not in contexts:
+                audit=self.store.audits.get(sid,page.id)
+                if audit is None: raise AppError('audit_expired',409)
+                index={}
+                for item in audit['items']: index.setdefault(item['key'],[]).append(item)
+                contexts[page.id]=(audit,index)
+            audit,index=contexts[page.id]
             for key in group['keys']:
                 if key not in index: raise AppError('invalid_selection')
-                sources=index[key].get('sources')
+                sources=index[key][0].get('sources')
                 has_reel=isinstance(sources,list) and any(isinstance(s,dict) and s.get('source')=='video_reels' for s in sources)
                 linked_reel=has_reel and any(isinstance(s,dict) and s.get('source')=='video_reels' and s.get('post_id') for s in sources)
                 ordered.append(((not has_reel,not linked_reel),{'page_id':page.id,'keys':[key]}))
@@ -71,9 +89,7 @@ class BulkDelete:
         selected=set()
         for group in groups:
             session,page=self.store.require_page(browser_id,sid,group['page_id'])
-            audit=self.store.audits.get(sid,page.id)
-            if audit is None: raise AppError('audit_expired',409)
-            index={i['key']:i for i in audit['items']}
+            audit,index=contexts[page.id]
             name=next(p['name'] for p in session.metadata() if p['id']==page.id)
             for key in group['keys']:
                 if key not in index: raise AppError('invalid_selection')
@@ -81,14 +97,14 @@ class BulkDelete:
                     duplicates+=1
                     continue
                 selected.add((page.id,key))
-                item=index[key]
+                item=index[key][0]
                 try:
                     sources=item.get('sources')
                     operation_scope='reel_video' if isinstance(sources,list) and any(isinstance(s,dict) and s.get('source')=='video_reels' for s in sources) else 'page_post'
-                    _,_,detail,_=self.single.resolve(browser_id,sid,page.id,key,operation_scope)
+                    _,_,detail,_=self.single.resolve(browser_id,sid,page.id,key,operation_scope,audit_context=contexts[page.id])
                 except AppError as error:
                     items.append({'supported':False,'page_id':page.id,'page_name':name,'key':key,
-                        'target_id':None,'kind':item.get('kind'),'text':item.get('text',''),
+                        'target_id':None,'kind':item.get('kind'),'text':item.get('text','')[:500],
                         'permalink':item.get('permalink'),'reason':error.code,'message':MESSAGES[error.code]})
                     continue
                 canonical=('video:' if operation_scope=='reel_video' else 'post:')+detail['target_id']
@@ -102,7 +118,13 @@ class BulkDelete:
                 targets.append(target)
                 items.append({**detail,'supported':True,'reason':None,'message':'Menargetkan objek video/Reel asli.' if operation_scope=='reel_video' else 'Menargetkan Page Post; media terpisah tidak dijamin ikut dihapus.'})
         cid=secrets.token_urlsafe(32)
-        expires=min(session.expires_at,time.monotonic()+CONFIRMATION_TTL)
+        # One indexed snapshot per Page. Refuse a preview if cache/session expired
+        # during preparation; never extend either TTL for a large selection.
+        self.store.require_page(browser_id,sid,groups[0]['page_id'])
+        for page_id in contexts:
+            entry=self.store.audits.pages.get((sid,page_id)) or self.store.audits.entries.get(sid)
+            if entry is None or entry.expires_at<=time.monotonic(): raise AppError('audit_expired',409)
+        expires=min(session.expires_at,time.monotonic()+self.store.settings.bulk_confirmation_ttl)
         unsupported=sum(not i['supported'] for i in items)
         self.confirmations[cid]=BulkConfirmation(browser_id,sid,expires,targets,pages,duplicates,unsupported)
         return {'confirmation_id':cid,'expires_in_seconds':max(0,int(expires-time.monotonic())),
@@ -127,11 +149,15 @@ class BulkDelete:
             if not page.access_token: raise AppError('page_token_missing',403)
             target.scope=self.store.token_key(page.access_token)
         # Atomic enqueue + consumption, without await. No cache lookup: confirmed snapshot owns IDs.
-        job=self.queue.add(browser_id,sid,copy.deepcopy(entry.targets),entry.duplicates,dict(entry.pages),'delete_page_posts',entry.unsupported)
+        # Transfer the immutable confirmed target list; do not retain a second
+        # 5000-target copy in the consumed confirmation.
+        job=self.queue.add(browser_id,sid,entry.targets,entry.duplicates,dict(entry.pages),'delete_page_posts',entry.unsupported)
         entry.job_id=job.id
+        entry.targets=[]
         return self.queue.snapshot(job)
 
     def owned(self,browser_id,sid,job_id):
+        if self.store.session(browser_id,sid) is None: raise AppError('session_expired',401)
         try: job=self.queue.owned(browser_id,sid,job_id)
         except AppError: raise AppError('bulk_job_not_found',404) from None
         if job.mode!='delete_page_posts': raise AppError('bulk_job_not_found',404)

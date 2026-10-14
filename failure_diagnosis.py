@@ -4,6 +4,7 @@ import re
 import time
 from errors import AppError
 from graph_api import sanitized_meta_message
+from content import safe_url
 
 PERMISSIONS=('pages_manage_posts','pages_read_engagement','pages_show_list','pages_read_user_content','pages_manage_metadata','business_management')
 PROBES=(
@@ -22,8 +23,50 @@ class FailureDiagnosis:
         self.store,self.bulk,self.single=store,bulk,single
         self.active=set()
 
+    def audit_target(self,browser,sid,payload):
+        if (not isinstance(payload.get('page_id'),str) or not re.fullmatch('[0-9]{1,40}',payload['page_id'])
+            or not isinstance(payload.get('keys'),list) or len(payload['keys'])!=1
+            or not isinstance(payload['keys'][0],str) or not 0<len(payload['keys'][0])<=160):
+            raise AppError('invalid_selection')
+        session,page=self.store.require_page(browser,sid,payload['page_id'])
+        if not page.access_token: raise AppError('page_token_missing',403)
+        audit=self.store.audits.get(sid,page.id)
+        if audit is None: raise AppError('audit_expired',409)
+        matches=[item for item in audit['items'] if item.get('key')==payload['keys'][0]]
+        if not matches: raise AppError('invalid_selection')
+        if len(matches)!=1: raise AppError('post_identity_ambiguous',409)
+        item=matches[0]
+        if item.get('page_id')!=page.id: raise AppError('page_not_owned',403)
+        sources=item.get('sources')
+        if item.get('kind')=='Story' or item.get('identified_story') is True:
+            raise AppError('identified_story',409)
+        if not isinstance(sources,list) or any(not isinstance(s,dict) for s in sources):
+            raise AppError('post_identity_ambiguous',409)
+        if any(s.get('source')=='stories' for s in sources): raise AppError('identified_story',409)
+        if any(s.get('source') not in {'published_posts','video_reels'} or not object_id(s.get('object_id')) for s in sources):
+            raise AppError('post_identity_ambiguous',409)
+        nodes={s['object_id'] for s in sources if s['source']=='published_posts'}
+        if not nodes: raise AppError('page_post_missing',409)
+        if len(nodes)!=1: raise AppError('post_identity_ambiguous',409)
+        node=next(iter(nodes))
+        if item.get('object_id') not in {s['object_id'] for s in sources} or any(s.get('post_id')!=node for s in sources if s['source']=='video_reels'):
+            raise AppError('post_identity_ambiguous',409)
+        ids={s['object_id'] for s in sources}|{node}
+        for job in self.store.content_jobs.entries.values():
+            if job.page_id==page.id and ids.intersection(job.story_ids): raise AppError('identified_story',409)
+        tokens=self.store.known_tokens()
+        clean=lambda value:sanitized_meta_message(value,tokens)
+        target={'page_id':page.id,'key':item['key'],'target_id':node,'operation_scope':'page_post',
+                'page_name':next(p['name'] for p in session.metadata() if p['id']==page.id),
+                'kind':clean(item.get('kind')),'text':clean(item.get('text')),
+                'permalink':safe_url(item.get('permalink'),False,list(tokens))}
+        identity=(page.id,node,tuple(sorted((s['source'],s['object_id'],s.get('post_id') or '') for s in sources)))
+        return target,identity
+
     def target(self,browser,sid,payload):
         if self.store.session(browser,sid) is None: raise AppError('session_expired',401)
+        if isinstance(payload,dict) and set(payload)=={'page_id','keys'}:
+            return self.audit_target(browser,sid,payload)[0],{}
         if isinstance(payload,dict) and set(payload)=={'job_id','key'}:
             if not all(isinstance(v,str) and 0<len(v)<=160 for v in payload.values()):
                 raise AppError('invalid_selection')
@@ -49,6 +92,8 @@ class FailureDiagnosis:
 
     async def run(self,graph,browser,sid,payload):
         target,previous=self.target(browser,sid,payload)
+        current_audit=set(payload)=={'page_id','keys'}
+        audit_identity=self.audit_target(browser,sid,payload)[1] if current_audit else None
         page_id,node=target['page_id'],target['target_id']
         if not object_id(node): raise AppError('post_identity_ambiguous',409)
         session,page=self.store.require_page(browser,sid,page_id)
@@ -65,6 +110,7 @@ class FailureDiagnosis:
             'post_id':None,'status_type':None,'application':None,'media_object_id':None,
             'photo_ids':[],'relations':[],'delete_permission_proven':False,
             'connection_context':'current_session','retry_after':None,
+            'diagnosis_origin':'current_audit' if current_audit else 'failed_result',
             'previous_failure':{k:previous.get(k) for k in ('http_status','error_code','error_subcode','reason')},
             'message':'GET hanya memeriksa koneksi sesi saat ini: sukses GET tidak membuktikan izin DELETE, gagal GET tidak membuktikan objek terhapus. Setelah reconnect/restart, keadaan token lama tidak dapat dibuktikan.'}
         def before_send():
@@ -72,6 +118,8 @@ class FailureDiagnosis:
             if not p.access_token: raise AppError('page_token_missing',403)
             if self.store.token_key(p.access_token)!=page_scope or self.store.token_key(live.user_token)!=user_scope:
                 raise AppError('session_expired',401)
+            if current_audit and self.audit_target(browser,sid,payload)[1]!=audit_identity:
+                raise AppError('post_identity_ambiguous',409)
             self.store.check_cooldown(page_scope)
             self.store.check_cooldown(user_scope)
             if report['request_count']>=5: raise AppError('diagnosis_budget',409)
@@ -158,6 +206,8 @@ class FailureDiagnosis:
                 report['checks'].append(check)
             # Never return old browser results after disconnect/expiry during the probe.
             self.store.require_page(browser,sid,page_id)
+            if current_audit and self.audit_target(browser,sid,payload)[1]!=audit_identity:
+                raise AppError('post_identity_ambiguous',409)
             return report
         finally:
             self.active.discard(sid)
