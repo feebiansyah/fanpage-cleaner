@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from content import identifier, safe_url
+from post_scope import SCOPE_VERSION, scope_decision
 from errors import AppError, MESSAGES
 from graph_api import delete_internal_code
 from content_cache import invalidate_confirmed_post
@@ -58,6 +59,8 @@ class SingleDelete:
         return copy.deepcopy(record)
 
     def resolve(self, browser_id, sid, page_id, key, operation_scope='page_post', *, audit_context=None):
+        if operation_scope != "page_post":
+            raise AppError("reel_delete_unsupported",409)
         session, page = self.store.require_page(browser_id, sid, page_id)
         if not page.access_token:
             raise AppError('page_token_missing', 403)
@@ -70,69 +73,38 @@ class SingleDelete:
         if len(matches) != 1:
             raise AppError('post_identity_ambiguous', 409)
         item = matches[0]
-        sources = item.get('sources')
         if item.get('page_id') != page_id:
             raise AppError('page_not_owned',403)
-        if item.get('kind') == 'Story' or item.get('identified_story') is True:
-            raise AppError('identified_story',409)
-        if not isinstance(sources,list) or any(not isinstance(s,dict) for s in sources):
-            raise AppError('post_identity_ambiguous',409)
-        if any(s.get('source') == 'stories' for s in sources):
-            raise AppError('identified_story',409)
-        if any(s.get('source') not in {'published_posts','video_reels'} or not identifier(s.get('object_id')) for s in sources):
-            raise AppError('post_identity_ambiguous',409)
-        posts = [s for s in sources if s['source'] == 'published_posts']
-        nodes = {s['object_id'] for s in posts}
-        reels = [s for s in sources if s['source'] == 'video_reels']
+        reason=scope_decision(item)
+        if reason:
+            raise AppError('identified_story' if item.get('kind')=='Story' or item.get('identified_story')
+                else 'post_identity_ambiguous' if reason in {'ambiguous_provenance','post_identity_ambiguous'}
+                else 'audit_scope_incompatible' if reason in {'unknown_scope','unknown_attachments','truncated_attachments'}
+                else 'post_media_unsupported',409)
+        sources=item['sources']
+        posts=sources
+        reels=[]
         linked_post=None
-        if operation_scope=='reel_video':
-            videos={s['object_id'] for s in reels}
-            if not videos: raise AppError('reel_source_missing',409)
-            if len(videos)!=1 or len(nodes)>1: raise AppError('post_identity_ambiguous',409)
-            node=next(iter(videos))
-            if not node.isdigit() or len(node)>40: raise AppError('reel_identity_ambiguous',409)
-            raw_links=[s['post_id'] for s in reels if s.get('post_id') is not None]
-            if any(not identifier(link) for link in raw_links): raise AppError('post_identity_ambiguous',409)
-            links=set(raw_links)
-            if len(links)>1:
-                raise AppError('post_identity_ambiguous',409)
-            linked_post=next(iter(links)) if links else None
-            if linked_post and '_' in linked_post and linked_post.split('_',1)[0]!=page_id:
-                raise AppError('post_identity_ambiguous',409)
-            if nodes and (not linked_post or nodes!={linked_post}):
-                raise AppError('post_identity_ambiguous',409)
-        elif operation_scope=='page_post':
-            if not posts: raise AppError('page_post_missing',409)
-            if len(nodes)!=1: raise AppError('post_identity_ambiguous',409)
-            node=next(iter(nodes))  # Never synthesize or reformat an ID.
-            if any(s.get('post_id') != node for s in reels):
-                raise AppError('post_identity_ambiguous',409)
-        else: raise AppError('invalid_single_delete')
-        if item.get('object_id') not in {s['object_id'] for s in sources}:
-            raise AppError('post_identity_ambiguous',409)
+        node=posts[0]['object_id']
         story_ids = {s['object_id'] for s in sources} | {node,linked_post}
         for job in self.store.content_jobs.entries.values():
             if job.page_id == page_id and story_ids.intersection(job.story_ids):
                 raise AppError('identified_story', 409)
-        if operation_scope=='reel_video':
-            # A merged audit row may carry the Post permalink. The manual link opens
-            # the exact original Reel ID; it is never used to derive a DELETE target.
-            link='https://www.facebook.com/reel/'+node
-        else:
-            link = safe_url(item.get('permalink'), False, [session.user_token, page.access_token])
-            if link is None:
-                raise AppError('post_permalink_missing', 409)
+        link = safe_url(item.get('permalink'), False, [session.user_token, page.access_token])
+        if link is None:
+            raise AppError('post_permalink_missing', 409)
         name = next(p['name'] for p in session.metadata() if p['id'] == page_id)
         target = {'key': key, 'target_id': node, 'page_id': page_id, 'page_name': name,
                   'kind': item.get('kind') or 'Jenis tidak tersedia', 'text': item.get('text', '')[:500],
                   'operation_scope':operation_scope, 'media_deletion_guaranteed':False,
                   'related_video_ids':sorted({s['object_id'] for s in reels}),
                   'linked_post_id':linked_post,
+                  'scope_version':SCOPE_VERSION, 'scope_item':scope_snapshot(item),
                   'thumbnail':safe_url(item.get('thumbnail'),True,list(self.store.known_tokens())),
                   'published_wib': item.get('published_wib') or 'Tanggal tidak tersedia', 'permalink': link}
         # Snapshot identity/provenance/visible metadata, not tokens or supplied delete IDs.
         identity = (node, tuple(sorted((s['source'], s['object_id'], s.get('post_id') or '') for s in sources)),
-                    target['kind'], target['text'], target['published_wib'], target['permalink'],target['thumbnail'],operation_scope)
+                    target['kind'], target['text'], target['published_wib'], target['permalink'],target['thumbnail'],operation_scope,repr(target['scope_item']))
         return session, page, target, identity
 
     def prepare(self, browser_id, sid, payload, operation_scope='page_post'):
@@ -150,11 +122,13 @@ class SingleDelete:
         expiry = min(session.expires_at, time.monotonic()+CONFIRMATION_TTL)
         self.confirmations[cid] = Confirmation(browser_id, sid, copy.deepcopy(target), identity, expiry)
         return {'confirmation_id': cid, 'expires_in_seconds': max(0, int(expiry-time.monotonic())),
-                'experimental':operation_scope=='reel_video','contract_verified':operation_scope!='reel_video',
+                'experimental':False,'contract_verified':True,
                 'target': target, 'story_automatically_verified': False,
-                'message': 'Reel memakai ID video asli. Keberhasilan target yang telah diuji tidak menjamin semua Reel dapat dihapus. Periksa link dan pastikan target benar, bukan Story. Ini penghapusan nyata dan tidak dapat dibatalkan.' if operation_scope=='reel_video' else 'Periksa permalink: pastikan target adalah Page Post yang ingin dihapus, bukan Facebook Story. Operasi menargetkan Page Post, bukan jaminan menghapus objek foto/video/Reel secara terpisah. Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.'}
+                'message': 'Periksa permalink: pastikan target adalah Page Post teks, status, tautan, atau foto yang ingin dihapus, bukan Story, video, atau Reel. Penghapusan tidak dapat dibatalkan.'}
 
     async def execute(self, graph, browser_id, sid, payload, operation_scope='page_post'):
+        if operation_scope != 'page_post':
+            raise AppError('reel_delete_unsupported',409)
         if (not isinstance(payload, dict) or set(payload) != {'confirmation_id', 'manual_target_confirmed'}
                 or payload['manual_target_confirmed'] is not True
                 or not isinstance(payload['confirmation_id'], str) or len(payload['confirmation_id']) > 100):
@@ -167,6 +141,7 @@ class SingleDelete:
         if entry.target['operation_scope']!=operation_scope:
             raise AppError('confirmation_not_found',404)
         self.store.require_page(browser_id, sid, entry.target['page_id'])
+        validate_scope_snapshot(entry.target)
         if entry.used:
             raise AppError('confirmation_used', 409)
         if time.monotonic() >= entry.expires_at:
@@ -174,7 +149,7 @@ class SingleDelete:
         session, page, _, identity = self.resolve(browser_id, sid, entry.target['page_id'], entry.target['key'],operation_scope)
         if identity != entry.identity:
             raise AppError('post_delete_unsupported', 409)
-        canonical = ('video:' if operation_scope=='reel_video' else 'post:')+entry.target['target_id']
+        canonical = 'post:'+entry.target['target_id']
         locks=identity_locks(canonical,entry.target)
         removal_ids=suppression_ids(entry.target['target_id'],entry.target)
         if locks.intersection(self.queue.locks):
@@ -194,6 +169,7 @@ class SingleDelete:
             'message':'Percobaan masih diproses. Pembacaan ini hanya lokal; jangan mengirim ulang DELETE.'}}
         self.last_results[sid] = pending_record
         def token_at_dispatch():
+            validate_scope_snapshot(entry.target)
             if time.monotonic() >= entry.expires_at:
                 raise AppError('confirmation_expired', 409)
             _, current_page, _, current_identity = self.resolve(browser_id, sid, entry.target['page_id'], entry.target['key'],operation_scope)
@@ -206,7 +182,7 @@ class SingleDelete:
                 raise AppError('post_delete_unsupported', 409)
             return current_page.access_token
         try:
-            send=graph.delete_reel_once if operation_scope=='reel_video' else graph.delete_post_once
+            send=graph.delete_post_once
             outcome = await send(entry.target['target_id'], scope, deadline, token_at_dispatch, observation)
             if outcome.get('request_started'):
                 from types import SimpleNamespace
@@ -232,7 +208,7 @@ class SingleDelete:
             entry.active = False
             self.queue.locks.difference_update(locks)
             self.queue.changed.set()
-            diagnostic = {'operation':'delete_one_reel_trial' if operation_scope=='reel_video' else 'delete_one_page_post', 'target_id':entry.target['target_id'],
+            diagnostic = {'operation':'delete_one_page_post', 'target_id':entry.target['target_id'],
                           'http_status':outcome.get('http_status') if outcome else None,
                           'error_code':outcome.get('error_code') if outcome else None,
                           'error_subcode':outcome.get('error_subcode') if outcome else None,
@@ -247,12 +223,8 @@ class SingleDelete:
                    else 'Hasil penghapusan belum dapat dipastikan. Post tetap ditampilkan. Jangan ulang otomatis; periksa Facebook secara manual.' if outcome['outcome']=='uncertain'
                    else 'Batas waktu lokal habis sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.' if reason == 'timeout'
                    else MESSAGES.get(reason, 'Percobaan penghapusan gagal. Post tetap ditampilkan.'))
-            if operation_scope=='reel_video':
-                message=('Respons memenuhi kriteria sukses percobaan Reel (success boolean true). Cocokkan di Facebook; ini bukan bukti seluruh Reel didukung.' if outcome['outcome']=='succeeded'
-                    else 'Hasil percobaan Reel belum pasti. Target tetap ditampilkan; jangan ulang otomatis.' if outcome['outcome']=='uncertain'
-                    else MESSAGES.get(reason,'Percobaan Reel gagal; target tetap ditampilkan.'))
             result = {**outcome, 'target':copy.deepcopy(entry.target), 'diagnostic':diagnostic, 'message':message,
-                      'experimental':operation_scope=='reel_video','contract_verified':operation_scope!='reel_video',
+                      'experimental':False,'contract_verified':True,
                       'manual_target_confirmed':True, 'story_automatically_verified':False, 'safe_for_bulk_delete':False}
             if sid in self.store.sessions and self.store.sessions[sid].expires_at > time.monotonic():
                 # Latest start wins; an older completion must not replace a newer attempt.
@@ -266,3 +238,19 @@ class SingleDelete:
     def reserved_slots(entry):
         if not entry.active: return 0
         return len(suppression_ids(entry.target['target_id'],entry.target))
+
+
+def scope_snapshot(item):
+    """Bounded classification/provenance only; no tokens or raw Graph payload."""
+    return copy.deepcopy({key:item[key] for key in ('page_id','object_id','sources','kind','identified_story','post_status_type','scope_metadata') if key in item})
+
+
+def validate_scope_snapshot(details, target_id=None, page_id=None):
+    item=details.get('scope_item')
+    if (details.get('operation_scope') != 'page_post' or details.get('scope_version') != SCOPE_VERSION
+        or not isinstance(item,dict) or scope_decision(item)
+        or item.get('object_id') != details.get('target_id')
+        or item.get('page_id') != details.get('page_id')
+        or (target_id is not None and target_id != details.get('target_id'))
+        or (page_id is not None and page_id != details.get('page_id'))):
+        raise AppError('audit_scope_incompatible',409)

@@ -1,6 +1,11 @@
 """Error tetap: tidak pernah menyertakan input, exception, atau pesan Meta."""
 
 MESSAGES = {
+    'post_scope_unsupported':'Hanya Page Post teks, status, tautan, atau foto yang didukung. Reel/video/Story tidak dapat dihapus; tidak ada DELETE dikirim.',
+    'reel_delete_unsupported':'Penghapusan Reel/video tidak didukung. Tidak ada DELETE dikirim.',
+    'audit_scope_incompatible':'Snapshot lama atau klasifikasi target tidak didukung. Muat ulang postingan dan siapkan konfirmasi baru; tidak ada DELETE dikirim.',
+    'post_media_unsupported':'Video, Reel, Story, dan jenis tidak dikenal tidak didukung. Muat ulang postingan; tidak ada DELETE dikirim.',
+
     'diagnosis_budget':'Budget diagnosis lima request aktual sudah habis; bagian berikutnya tidak dipanggil.',
     'diagnosis_busy':'Diagnosis masih berjalan atau kapasitas diagnosis lokal penuh.',
     'diagnosis_not_failed_post':'Diagnosis ini hanya untuk satu hasil Page Post gagal milik sesi; target sukses/Reel tidak diproses kembali.',
@@ -13,7 +18,7 @@ MESSAGES = {
     "network_before_send": "Transport gagal sebelum pengiriman DELETE. Tidak ada request penghapusan dikirim.",
     "bulk_limit": "Batas lokal bulk maksimal 5000 pilihan per konfirmasi (atau batas konfigurasi yang lebih kecil). Ini bukan batas Meta.",
     "bulk_confirmation_not_found": "Konfirmasi bulk tidak tersedia atau bukan milik sesi browser ini.",
-    "bulk_no_supported_targets": "Tidak ada Post/Reel yang didukung pada snapshot ini. Tidak ada penghapusan dikirim.",
+    "bulk_no_supported_targets": "Tidak ada Page Post yang didukung pada snapshot ini. Tidak ada penghapusan dikirim.",
     "bulk_job_not_found": "Pekerjaan penghapusan tidak tersedia pada sesi browser ini.",
     "bulk_dispatch_stopped": "Dispatch baru dihentikan. Target belum dikirim tidak dianggap terhapus.",
     "bulk_page_blocked": "Dispatch Page ini diblokir karena penolakan izin pada token terkait.",

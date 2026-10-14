@@ -33,13 +33,14 @@ class PagePostExecutor:
         from content_cache import invalidate_confirmed_post
         from errors import AppError
         from graph_api import delete_internal_code
-        from single_delete import OBSERVATION_FIELDS
+        from single_delete import OBSERVATION_FIELDS, validate_scope_snapshot
         q=self.queue
         started=time.monotonic()
         observation={'phase':'graph_dispatch','request_started':False}
         target.diagnostic=observation
         result=None
         def token_at_dispatch():
+            validate_scope_snapshot(target.details,target.delete_target,target.page_id)
             if job.stop_requested or job.terminal:
                 raise AppError('bulk_dispatch_stopped',409)
             reason=q.block_reason(target)
@@ -53,12 +54,13 @@ class PagePostExecutor:
             q.persist(job,index)  # Refuse dispatch if checkpoint cannot record processing.
             return page.access_token
         try:
+            validate_scope_snapshot(target.details,target.delete_target,target.page_id)
             session,page=q.store.require_page(job.browser_id,job.session_id,target.page_id)
             if not page.access_token: raise AppError('page_token_missing',403)
             target.scope=q.store.token_key(page.access_token)
             deadline=min(job.expires_at,session.expires_at,started+q.settings.operation_timeout)
             del page,session
-            send=self.graph.delete_reel_once if target.details.get('operation_scope')=='reel_video' else self.graph.delete_post_once
+            send=self.graph.delete_post_once
             result=await send(target.delete_target,target.scope,deadline,token_at_dispatch,observation)
             status,reason=result['outcome'],result['reason']
             if result.get('request_started'):
@@ -83,7 +85,7 @@ class PagePostExecutor:
             result={**observation,'outcome':status,'reason':reason,'internal_code':delete_internal_code(error,observation['phase'])}
         finally:
             if result is not None:
-                target.diagnostic={'operation':'delete_reel_video' if target.details.get('operation_scope')=='reel_video' else 'delete_page_post','target_id':target.delete_target,
+                target.diagnostic={'operation':'delete_page_post','target_id':target.delete_target,
                     'outcome':result['outcome'],'reason':result['reason'],'duration_ms':round((time.monotonic()-started)*1000),
                     **{key:result.get(key,observation.get(key)) for key in ('http_status','error_code','error_subcode',*OBSERVATION_FIELDS)}}
         return Outcome(status,reason,False,result.get('retry_after') or 0)

@@ -41,7 +41,7 @@
       </div>
       <label for="max-posts" class="limit-label">Maksimal postingan</label>
       <input id="max-posts" type="number" value="100" min="1" max="5000" step="1" inputmode="numeric" aria-describedby="posts-help">
-      <p class="help" id="posts-help">Muat konten, pilih yang ingin dihapus, lalu periksa daftar sebelum satu konfirmasi. Maksimal 5000 target per penghapusan.</p>
+      <p class="help" id="posts-help">Muat Post teks/status/link dan foto, pilih yang ingin dihapus, lalu periksa daftar sebelum satu konfirmasi. Maksimal 5000 target per penghapusan.</p>
     </section>
 
     <section class="card" aria-labelledby="content-title">
@@ -57,7 +57,7 @@
         <summary>Ringkasan sumber API</summary>
         <div id="source-diagnostics" class="help" aria-live="polite"></div>
       </details>
-      <p id="audit-warning" class="help">Story teridentifikasi ditolak. Periksa setiap target melalui link sebelum konfirmasi.</p>
+      <p id="audit-warning" class="help">Video, Reel, Story dan metadata tidak pasti dilewati. Periksa seluruh link sebelum konfirmasi; pengecualian Story otomatis tidak dijamin.</p>
       <p id="selected-count" class="help" role="status" aria-live="polite">Terpilih 0 konten.</p>
       <div id="content-list" class="content-list" aria-label="Daftar konten Fanpage">
         <p>Belum ada konten yang dimuat.</p>
@@ -79,8 +79,6 @@
       <div id="access-post-result" class="help" role="status" aria-live="polite"></div>
       <div class="actions">
         <button id="delete-one" class="danger" type="button" disabled>Hapus 1 Post</button>
-        <button id="delete-one-reel" class="danger" type="button" disabled>Uji Hapus 1 Reel</button>
-        <p class="help">Keberhasilan Reel yang telah diuji tidak menjamin semua Reel dapat dihapus.</p>
         <button id="delete-read-last" class="secondary" type="button" disabled>Baca Hasil Hapus Terakhir</button>
       </div>
       <p id="delete-status" class="help" role="status" aria-live="polite">Belum ada hasil diagnosis penghapusan.</p>
@@ -110,7 +108,7 @@
     <h2 id="delete-dialog-title">Konfirmasi Hapus 1 Post</h2>
     <div id="delete-details"></div>
     <p id="delete-warning" class="notice">Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.</p>
-    <p id="delete-help" class="help">Buka link Facebook dan periksa bahwa target adalah Page Post yang memang ingin dihapus, bukan Story. Operasi menargetkan Page Post, bukan jaminan menghapus objek foto/video/Reel secara terpisah. Ini konfirmasi manual Anda; aplikasi belum memverifikasi seluruh cakupan Story secara otomatis.</p>
+    <p id="delete-help" class="help">Buka link Facebook dan periksa bahwa target adalah Page Post yang memang ingin dihapus, bukan Story. Operasi hanya menargetkan ID Page Post asli; penghapusan objek foto terpisah tidak dijamin. Ini konfirmasi manual Anda; aplikasi belum memverifikasi seluruh cakupan Story secara otomatis.</p>
     <label class="checkbox-label" for="delete-manual-check">
       <input id="delete-manual-check" type="checkbox">
       <span id="delete-manual-text">Saya sudah memeriksa link dan memastikan target adalah Page Post yang dimaksud, bukan Story, serta ingin menghapusnya.</span>
@@ -125,7 +123,7 @@
     <div id="bulk-details"></div>
     <nav id="bulk-preview-pagination" class="local-pagination" aria-label="Halaman daftar konfirmasi lokal"></nav>
     <p class="notice">Penghapusan tidak dapat dibatalkan. Hanya subset yang didukung di bawah ini akan dikirim.</p>
-    <label class="checkbox-label"><input id="bulk-manual-check" type="checkbox">Saya sudah memeriksa seluruh link dan daftar target yang didukung, memastikan semuanya Post atau Reel yang ingin dihapus dan bukan Story. Ini pemeriksaan manual; pengecualian Story otomatis belum lengkap.</label>
+    <label class="checkbox-label"><input id="bulk-manual-check" type="checkbox">Saya sudah memeriksa seluruh link dan daftar target yang didukung, memastikan semuanya Post teks/status/link atau foto yang ingin dihapus, bukan video, Reel atau Story. Ini pemeriksaan manual; pengecualian Story otomatis belum lengkap.</label>
     <div class="actions"><button id="bulk-cancel" type="button" class="secondary">Batal</button><button id="bulk-confirm" type="button" class="danger" disabled>Konfirmasi Hapus Terpilih</button></div>
   </dialog>
 </body>

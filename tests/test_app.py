@@ -107,8 +107,8 @@ class ConnectionContract(unittest.IsolatedAsyncioTestCase):
                     self.disabled[attrs.get('id')] = "disabled" in attrs
         operations = Operations()
         operations.feed((await self.client.get("/")).text)
-        self.assertEqual(len(operations.buttons), 15)
-        for control in ['load-posts','select-all','delete-selected','dry-run','stop-load','delete-one','delete-one-reel','delete-confirm','delete-read-last','bulk-confirm','bulk-read']:
+        self.assertEqual(len(operations.buttons), 14)
+        for control in ['load-posts','select-all','delete-selected','dry-run','stop-load','delete-one','delete-confirm','delete-read-last','bulk-confirm','bulk-read']:
             self.assertTrue(operations.disabled[control], control)
         self.assertFalse(operations.disabled['delete-cancel'])
         graph_http = self.application.state.http

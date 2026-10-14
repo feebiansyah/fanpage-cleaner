@@ -295,11 +295,8 @@ class BulkCapacity(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(sum(target.status in {'cancelled', 'blocked'} for target in job.targets), 1000-sent)
                     self.assertEqual(len(self.calls)-before, sent)
 
-    async def test_cross_browser_linked_reel_lock_blocks_alias_but_allows_other_post(self):
-        merged = fixture.post(1, kind='Reel', sources=[
-            {'source':'published_posts', 'object_id':'11_1'},
-            {'source':'video_reels', 'object_id':'987', 'post_id':'11_1'}])
-        self.allowed.add('987')
+    async def test_cross_browser_post_lock_blocks_duplicate_but_allows_other_post(self):
+        merged = fixture.post(1)
         self.seed([merged])
         bid, _, _ = self.store.bootstrap(None)
         sid, session = self.store.replace(bid, 'dummy-second-owner',
@@ -312,7 +309,7 @@ class BulkCapacity(unittest.IsolatedAsyncioTestCase):
         a_entered, b_entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
         async def blocked(request):
-            if request.url.path == '/v26.0/987':
+            if request.url.path == '/v26.0/11_1':
                 a_entered.set()
             elif request.url.path == '/v26.0/11_2':
                 b_entered.set()
@@ -354,34 +351,25 @@ class BulkCapacity(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(alias.status, 'blocked')
             self.assertIn('bulk_target_deleted', alias.reasons)
             self.assertEqual({request.url.path for request, _ in self.calls},
-                             {'/v26.0/987', '/v26.0/11_2'})
+                             {'/v26.0/11_1', '/v26.0/11_2'})
             self.assertEqual(len(self.calls), 2)
         finally:
             release.set()
             await other.aclose()
 
-    async def test_shared_story_post_and_linked_reel_alias_do_not_change_original_delete_id(self):
-        shared = fixture.post(1, type='shared_story', status_type='shared_story',
-                              post_status_type='shared_story')
-        story = fixture.post(2, kind='Story')
-        linked = fixture.post(3, key='video_reels:987', object_id='987', kind='Reel',
-                              sources=[{'source':'video_reels', 'object_id':'987', 'post_id':'11_3'}],
-                              permalink=None)
-        self.allowed.add('987')
-        self.seed([shared, story, fixture.post(3), linked])
-        keys = [row['key'] for row in (shared, story, fixture.post(3), linked)]
-        data = (await self.prepare(selections=[{'page_id':'11', 'keys':keys}])).json()
-        self.assertEqual(data['supported'], 2)
-        self.assertEqual(data['duplicates'], 1)
-        self.assertEqual(data['unsupported'], 1)
-        jid = (await self.confirm(data['confirmation_id'])).json()['job_id']
-        done = await self.wait_terminal(jid)
-        self.assertEqual(done['counts']['succeeded'], 2)
-        self.assertEqual({request.url.path for request, _ in self.calls},
-                         {'/v26.0/11_1', '/v26.0/987'})
-        success = next(row for row in (await self.get_snapshot(jid))['changes']
-                       if row['delete_target']=='987' and row['status']=='succeeded')
-        self.assertEqual(success['details']['linked_post_id'], '11_3')
+    async def test_shared_story_link_post_is_not_story_and_reel_alias_is_rejected(self):
+        shared=fixture.post(1,scope_metadata={'status_type':'shared_story','attachments':{'data':[{'type':'share'}]}})
+        story=fixture.post(2,kind='Story',identified_story=True)
+        linked=fixture.post(3,key='video_reels:987',object_id='987',kind='Reel',
+                            sources=[{'source':'video_reels','object_id':'987','post_id':'11_3'}])
+        self.seed([shared,story,fixture.post(3),linked])
+        data=(await self.prepare(selections=[{'page_id':'11','keys':[i['key'] for i in (shared,story,fixture.post(3),linked)]}])).json()
+        self.assertEqual(data['supported'],2)
+        self.assertEqual(data['unsupported'],2)
+        jid=(await self.confirm(data['confirmation_id'])).json()['job_id']
+        done=await self.wait_terminal(jid)
+        self.assertEqual(done['counts']['succeeded'],2)
+        self.assertEqual({request.url.path for request,_ in self.calls},{'/v26.0/11_1','/v26.0/11_3'})
 
 
 if __name__ == '__main__':

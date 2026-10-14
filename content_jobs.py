@@ -23,10 +23,8 @@ class ContentJob:
         now = time.monotonic()
         self.deadline = min(session_expiry, now + settings.posts_job_timeout)
         self.idle_expires_at = min(session_expiry, now + settings.content_job_idle_ttl)
-        self.sources = [Source('published_posts'), Source('video_reels'), Source('stories')]
-        self.story_ids = set()
-        self.story_checked = False
-        self.story_complete = False
+        self.sources = [Source('published_posts')]
+        self.story_ids = set()  # Explicit known IDs only; never acquired from a Story edge.
         self.limitations = []
         self.errors = []
         self.revision = 0
@@ -96,6 +94,9 @@ class ContentJobs:
         if job is None or job.browser_id != browser_id or job.session_id != session_id:
             raise AppError('job_not_found', 404)
         self.store.require_page(browser_id, session_id, job.page_id)
+        if len(job.sources) != 1 or job.sources[0].edge != 'published_posts':
+            self.discard(job)
+            raise AppError('audit_scope_incompatible', 409)
         return job
 
     def start(self, browser_id, session_id, page_id, limit):
@@ -120,8 +121,9 @@ class ContentJobs:
         return job
 
     def _items(self, job):
-        items, unlinked = self.loader._merge(job.sources[:2])
-        return [item for item in items if not self.store.audits.is_removed(item, job.page_id)], unlinked
+        items, unlinked = self.loader._merge(job.sources)
+        return [item for item in items if item['object_id'] not in job.story_ids
+                and not self.store.audits.is_removed(item, job.page_id)], unlinked
 
     def snapshot(self, job):
         items, unlinked = self._items(job)
@@ -147,16 +149,16 @@ class ContentJobs:
                   'job_remaining_seconds': max(0, int(job.deadline-time.monotonic())),
                   'found': len(items), 'displayed': len(selected), 'items': selected,
                   'dated_count': dated, 'undated_count': len(selected)-dated,
-                  'scanned': sum(s.received for s in job.sources[:2]),
-                  'excluded_stories': sum(s.excluded for s in job.sources[:2]),
+                  'scanned': sum(s.received for s in job.sources),
+                  'excluded_stories': sum(s.excluded for s in job.sources),
                   'sources': summaries, 'errors': list(job.errors),
-                  'sources_exhausted': all(s.exhausted for s in job.sources[:2]),
+                  'sources_exhausted': all(s.exhausted for s in job.sources),
                   'limit_reached': len(items) >= job.limit, 'retrieval_complete': job.terminal and not job.errors and job.state not in {'partial','cancelled'},
                   'coverage_complete': False, 'latest_guaranteed': False, 'safe_for_delete': False,
                   'bulk_selectable': bool(selected), 'selection_purpose': 'audit_only',
-                  'story_exclusion': 'matched_ids_only' if job.story_complete else 'unverified',
+                  'story_exclusion': 'scope_filtered',
                   'limitations': limitations,
-                  'warning': AUDIT_WARNING + ' Pilihan untuk audit, termasuk hasil parsial; pengecualian Story seluruh kandidat belum terbukti. Hapus satu Post memerlukan pemeriksaan dan konfirmasi manual terpisah; bulk tetap nonaktif.'}
+                  'warning': AUDIT_WARNING + ' Pilihan untuk audit; tindakan hapus memerlukan pemeriksaan terpisah.'}
         if job.errors:
             result['error'] = job.errors[0]
         if job.terminal:
@@ -183,30 +185,18 @@ class ContentJobs:
         diagnostic['message'] = {'timeout':'Request sumber Meta timeout setelah retry terbatas; halaman diterima tetap tersedia.',
                                  'pagination_incomplete':'Pagination sumber terhenti; halaman diterima tetap tersedia.'}.get(error.code, diagnostic['message'])
         job.errors.append(diagnostic)
-        if source.edge == 'stories':
-            job.story_checked = True
-            job.limitations.append('story_probe_failed')
         # Actual failed source is terminal; no infinite retry on next step.
         if error.code == 'token_invalid':
             self._finish(job, 'partial', 'token_invalid')
 
     def _choose(self, job):
-        content = job.sources[:2]
-        # Initial coverage visit uses a small fair share, not N per source.
-        for source in content:
-            if source.page_count == 0 and source.status is None:
-                return source
         items, _ = self._items(job)
-        if items and not job.story_checked:
-            return job.sources[2]
         if len(items) >= job.limit:
             self._finish(job, 'partial' if job.errors else 'limit_reached', 'unique_limit')
             return None
-        for _ in range(2):
-            source = content[job.next_source]
-            job.next_source = (job.next_source + 1) % 2
-            if source.status is None and not source.exhausted:
-                return source
+        source = job.sources[0]
+        if source.status is None and not source.exhausted:
+            return source
         self._finish(job, 'partial' if job.errors else 'empty' if not items else 'source_exhausted', 'source_exhausted')
         return None
 
@@ -241,45 +231,22 @@ class ContentJobs:
             source.attempts_on_page = getattr(source,'attempts_on_page',0)+1
         found = len(self._items(job)[0])
         remaining = max(1, job.limit-found)
-        unvisited = sum(s.page_count == 0 and s.status is None for s in job.sources[:2])
-        share = math.ceil(remaining / max(1, unvisited)) if source.edge != 'stories' else job.limit
-        size = min(self.settings.page_size, share, self.settings.story_max_items if source.edge == 'stories' else 5000)
+        share = remaining
+        size = min(self.settings.page_size, share)
         data, next_error = await self.loader._fetch(source, page, token_key, hidden, size, job.deadline, guard, attempt)
         source.attempts_on_page = 0
         job.interruptions.pop(source.edge, None)
-        if source.edge == 'stories':
-            job.story_checked = True
-            refs = True
-            for item in data:
-                for field in ('id','post_id','media_id'):
-                    value = identifier(item.get(field))
-                    if value:
-                        job.story_ids.add(value)
-                refs = refs and bool(identifier(item.get('post_id')) and identifier(item.get('media_id')))
-            for content in job.sources[:2]:
-                for key, candidate in list(content.candidates.items()):
-                    if any(i in job.story_ids for i in candidate['_story_ids']):
-                        del content.candidates[key]
-                        job.candidate_bytes-=self._candidate_size(candidate)
-                        content.excluded += 1
-            job.story_complete = source.exhausted and refs
-            if not refs:
-                job.limitations.append('story_reference_unverified')
-            if not source.exhausted:
-                job.limitations.append('story_probe_incomplete')
-            source.status = 'source_exhausted' if source.exhausted else 'limit_reached'
-            source.stop_reason = 'source_exhausted' if source.exhausted else 'story_verification_budget'
-        else:
-            for item in data:
-                candidate = self.loader._normalize(item, source.edge, job.page_id, hidden)
-                if candidate is None:
-                    source.skipped += 1
-                elif any(i in job.story_ids for i in candidate['_story_ids']):
+        for item in data:
+            candidate, skip_reason = self.loader._normalize_with_reason(item, source.edge, job.page_id, hidden)
+            if candidate is None:
+                source.skipped += 1
+                source.skip_reasons[skip_reason] = source.skip_reasons.get(skip_reason, 0) + 1
+                if skip_reason == 'identified_story':
                     source.excluded += 1
-                else:
-                    self._admit_candidate(job,source,candidate)
-            if source.exhausted:
-                source.status, source.stop_reason = 'source_exhausted', 'source_exhausted'
+            else:
+                self._admit_candidate(job, source, candidate)
+        if source.exhausted:
+            source.status, source.stop_reason = 'source_exhausted', 'source_exhausted'
         if next_error:
             raise next_error
 
@@ -349,6 +316,9 @@ class ContentJobs:
         return self.snapshot(job)
 
     async def step(self, job, revision):
+        if len(job.sources) != 1 or job.sources[0].edge != 'published_posts':
+            self.discard(job)
+            raise AppError('audit_scope_incompatible', 409)
         # Body reading awaited after route ownership lookup: recheck revocation.
         if self.entries.get(job.id) is not job:
             raise AppError('load_cancelled',409)

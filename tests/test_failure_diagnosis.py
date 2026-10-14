@@ -43,7 +43,7 @@ class FailureDiagnosis(unittest.IsolatedAsyncioTestCase):
         self.store=self.app.state.store
         self.bid,_,_=self.store.bootstrap(None)
         self.sid,self.session=self.store.replace(self.bid,USER,[Page('11','Page',PAGE)])
-        item={'key':'published_posts:11_123','page_id':'11','object_id':'11_123','kind':'Foto','text':'Photo',
+        item={'key':'published_posts:11_123','page_id':'11','object_id':'11_123','kind':'Foto','text':'Photo','scope_metadata':{'status_type':'added_photos','attachments':{'data':[{'type':'photo'}]}},
               'sources':[{'source':'published_posts','object_id':'11_123'}],'permalink':'https://www.facebook.com/photo.php?fbid=555'}
         self.store.audits.reserve(self.sid,1,'11')
         self.store.audits.put(self.sid,{'page_id':'11','items':[item],'displayed':1},self.session.expires_at)

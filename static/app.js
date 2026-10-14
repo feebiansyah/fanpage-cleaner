@@ -20,14 +20,12 @@
   const dryResults = document.getElementById("dry-results");
   const dryPagination = document.getElementById("dry-pagination");
   const deleteButton = document.getElementById("delete-one");
-  const deleteReelButton = document.getElementById("delete-one-reel");
   const deleteTitle = document.getElementById("delete-dialog-title");
   const deleteWarning = document.getElementById("delete-warning");
   const deleteHelp = document.getElementById("delete-help");
   const deleteManualText = document.getElementById("delete-manual-text");
   const deleteModes = Object.freeze({
-    page_post: Object.freeze({route:"/api/posts/delete", label:"Post", idLabel:"Page Post"}),
-    reel_video: Object.freeze({route:"/api/reels/delete", label:"Reel", idLabel:"video Reel"})
+    page_post: Object.freeze({route:"/api/posts/delete", label:"Post", idLabel:"Page Post"})
   });
   const deleteDialog = document.getElementById("delete-dialog");
   const deleteDetails = document.getElementById("delete-details");
@@ -118,7 +116,6 @@
     loadButton.disabled = !ready || busy || postsLoading || dryLoading || deleting || starting || stopping || !connected || !fanpageSelect.value || Date.now() < cooldownUntil;
     dryButton.disabled = !ready || busy || postsLoading || dryLoading || deleting || !connected || selected.size === 0;
     deleteButton.disabled = !ready || busy || postsLoading || dryLoading || deleting || !connected || Date.now() < cooldownUntil || !onePost();
-    deleteReelButton.disabled = deleteButton.disabled;
     deleteConfirm.disabled = !deletion || !deleteManual.checked || deleteExecuting || Date.now() < cooldownUntil;
     deleteCancel.disabled = deleteExecuting;
     deleteManual.disabled = deleteExecuting;
@@ -138,7 +135,6 @@
     const deleteHint = !connected ? "Hubungkan Facebook." : deleting || postsLoading || dryLoading || busy ? "Tunggu proses selesai." : Date.now() < cooldownUntil ? "Tunggu jeda API." : !selected.size ? "Pilih konten dahulu." : "";
     bulkButton.title = bulkButton.disabled ? deleteHint : "";
     deleteButton.title = deleteButton.disabled ? deleteHint || "Pilih tepat satu Page Post." : "";
-    deleteReelButton.title = deleteReelButton.disabled ? deleteHint || "Pilih tepat satu konten; backend memeriksa ID video Reel asli." : "Periksa satu Reel melalui alat diagnosis.";
     maxPosts.disabled = postsLoading || busy;
     loadButton.textContent = postsLoading ? "Sedang memuat…" : "Load Posts";
     loadStatus.setAttribute("aria-busy", String(postsLoading));
@@ -241,7 +237,7 @@
     closeBulk();
     if (!connected) clearBulk();
     deleteSelectionHint = null;
-    deleteStatus.textContent = "Pilih konten, lalu klik Hapus Terpilih, Hapus 1 Post, atau Uji Hapus 1 Reel (eksperimental).";
+    deleteStatus.textContent = "Pilih konten, lalu klik Hapus Terpilih, Hapus 1 Post.";
     cancelDry();
     dryResults.replaceChildren();
     dryPagination.replaceChildren();
@@ -381,7 +377,7 @@
     const errorSource = {published_posts: "Postingan publik", video_reels: "Reels", stories: "Pemeriksaan Story"}[data.error?.source];
     const counts = Number.isInteger(data.request_count) ? ` Diterima ${data.scanned} item; ${data.request_count} request termasuk retry. ${data.dated_count} bertanggal; ${data.undated_count} tanpa tanggal.` : "";
     loadStatus.textContent = `Ditemukan ${data.found} kandidat unik; ditampilkan ${data.displayed}.${counts} ${stateText}${data.error ? ` ${errorSource ? `${errorSource}: ` : ""}${data.error.message}` : ""}`;
-    auditWarning.textContent = "Story teridentifikasi ditolak. Periksa setiap target melalui link sebelum konfirmasi penghapusan.";
+    auditWarning.textContent = "Hanya Post teks/status/link dan foto. Metadata tidak pasti dilewati; periksa seluruh link dan pastikan bukan video, Reel atau Story sebelum konfirmasi.";
     loadProgress.setAttribute("value", String(Math.min(100, data.displayed / (data.limit || 1) * 100)));
     renderAuditPage();
   }
@@ -409,8 +405,8 @@
     if (hint !== deleteSelectionHint && !deleteExecuting && !deletePreparing && !deletion) {
       deleteSelectionHint = hint;
       deleteStatus.textContent = selected.size === 1
-        ? "Klik Hapus 1 Post, Hapus Terpilih, atau Uji Hapus 1 Reel (eksperimental) untuk melanjutkan."
-        : "Pilih konten untuk Hapus Terpilih; pilih tepat satu untuk Hapus 1 Post atau Uji Hapus 1 Reel.";
+        ? "Klik Hapus Terpilih atau Hapus 1 Post untuk melanjutkan."
+        : "Pilih konten untuk Hapus Terpilih; pilih tepat satu untuk Hapus 1 Post.";
     }
     controls();
   }
@@ -419,7 +415,7 @@
     sourceDiagnostics.replaceChildren();
     const names = {published_posts: "Postingan publik", video_reels: "Reels", stories: "Pemeriksaan Story"};
     const statuses = {running: "Sedang memuat", cooldown: "Menunggu cooldown", limit_reached: "Batas tercapai", source_exhausted: "Sumber habis", failed: "Gagal", cancelled: "Dibatalkan", not_needed: "Tidak diperlukan"};
-    const reasons = {unique_limit: "batas konten unik gabungan tercapai", source_exhausted: "tidak ada halaman berikutnya",
+    const reasons = {unique_limit: "batas Post biasa/foto unik tercapai", source_exhausted: "tidak ada halaman berikutnya",
       story_verification_budget: "batas pemeriksaan Story satu halaman; histori tidak ditelusuri",
       no_eligible_candidates: "tidak ada kandidat yang perlu diperiksa", page_limit: "batas halaman lokal",
       pagination_repeated: "cursor atau halaman berulang", invalid_pagination: "indikator pagination tidak valid",
@@ -431,14 +427,29 @@
       meta_request_timeout: "request Meta timeout setelah retry terbatas", step_timeout_limit: "batas pengulangan timeout langkah",
       step_request_limit: "batas request langkah", job_request_limit: "batas request total pekerjaan", job_step_limit: "batas langkah total",
       job_timeout: "batas waktu total pekerjaan", audit_capacity: "batas memori kandidat", internal_error: "kegagalan internal lokal"};
+    const skipLabels = Object.freeze({
+      unknown_scope: "jenis konten tidak pasti", unknown_attachments: "metadata attachment tidak pasti",
+      truncated_attachments: "attachment tidak lengkap", unsupported_status_type: "jenis status di luar cakupan",
+      unsupported_attachment_type: "jenis attachment di luar cakupan", ambiguous_provenance: "asal identitas ambigu",
+      identified_story: "Story teridentifikasi"
+    });
     const countText = value => Number.isInteger(value) && value >= 0 ? String(value) : "tidak tersedia";
     for (const source of sources) {
       const reason = source.stop_reason?.startsWith("stopped_after_")
         ? `pekerjaan dihentikan setelah ${reasons[source.stop_reason.slice(14)] || "kegagalan sumber lain"}`
         : reasons[source.stop_reason] || "alasan belum tersedia";
       const row = document.createElement("p");
-      row.textContent = `${names[source.source] || "Sumber"}: ${countText(source.requests)} request (termasuk retry), ${countText(source.pages)} halaman, ${countText(source.received)} item diterima. ${statuses[source.status] || "Status belum tersedia"} — ${reason}.`;
+      const filtered = Number.isInteger(source.skipped) ? ` ${countText(source.eligible)} lolos filter; ${countText(source.skipped)} dilewati.` : "";
+      row.textContent = `${names[source.source] || "Sumber"}: ${countText(source.requests)} request (termasuk retry), ${countText(source.pages)} halaman, ${countText(source.received)} item diterima.${filtered} ${statuses[source.status] || "Status belum tersedia"} — ${reason}.`;
       sourceDiagnostics.appendChild(row);
+      const skippedReasons = Object.entries(skipLabels)
+        .filter(([key]) => Number.isSafeInteger(source.skip_reasons?.[key]) && source.skip_reasons[key] > 0)
+        .map(([key, label]) => `${label}: ${source.skip_reasons[key]}`);
+      if (skippedReasons.length) {
+        const detail = document.createElement("p");
+        detail.textContent = `Alasan dilewati: ${skippedReasons.join("; ")}.`;
+        sourceDiagnostics.appendChild(detail);
+      }
     }
   }
 
@@ -623,6 +634,7 @@
   });
 
   async function prepareDelete(operationScope) {
+    if (operationScope !== "page_post") return;
     const mode = deleteModes[operationScope];
     const item = onePost();
     if (!ready || !connected || busy || postsLoading || dryLoading || deletePreparing || deleteExecuting || deletion || bulkBusy() || Date.now() < cooldownUntil || !item) return;
@@ -638,14 +650,10 @@
       const targetScope = data.target?.operation_scope || "page_post";
       if (targetScope !== operationScope || data.target?.page_id !== pageId || data.target?.key !== item.key || !data.target?.target_id || !safeAuditURL(data.target.permalink)) throw new Error("Snapshot konfirmasi tidak sesuai target pilihan atau cakupan operasi.");
       deletion = Object.freeze({...data, operationScope, target:Object.freeze({...data.target})});
-      deleteTitle.textContent = `Konfirmasi ${operationScope === "reel_video" ? "Uji Hapus" : "Hapus"} 1 ${mode.label}`;
-      deleteWarning.textContent = operationScope === "reel_video"
-        ? "Satu penghapusan nyata dengan ID video Reel asli dari hasil Load Posts. Keberhasilan target sebelumnya tidak menjamin semua Reel dapat dihapus. Penghapusan tidak dapat dibatalkan."
-        : "Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.";
-      deleteHelp.textContent = operationScope === "reel_video"
-        ? "Buka link Facebook dan pastikan ID video asli serta Page cocok dengan Reel yang ingin dihapus. Periksa bahwa target benar-benar Reel, bukan Story. Tidak ada retry otomatis atau percobaan ID alternatif."
-        : "Buka link Facebook dan periksa bahwa target adalah Page Post yang memang ingin dihapus, bukan Story. Ini konfirmasi manual Anda; aplikasi belum memverifikasi seluruh cakupan Story secara otomatis.";
-      deleteManualText.textContent = `Saya sudah memeriksa link, ID asli dan Page, memastikan target adalah ${operationScope === "reel_video" ? "Reel" : "Page Post"} yang dimaksud, bukan Story, serta ingin menghapusnya secara permanen.`;
+      deleteTitle.textContent = "Konfirmasi Hapus 1 Post";
+      deleteWarning.textContent = "Post ini akan dihapus dari Fanpage. Penghapusan tidak dapat dibatalkan.";
+      deleteHelp.textContent = "Periksa link, ID dan Page: target harus Post teks/status/link atau foto yang dimaksud, bukan video, Reel atau Story. Pemeriksaan manual tetap wajib; metadata tidak menjamin seluruh Story teridentifikasi.";
+      deleteManualText.textContent = "Saya sudah memeriksa link, ID asli dan Page, memastikan target adalah Post biasa atau foto yang dimaksud, bukan video, Reel atau Story, serta ingin menghapusnya secara permanen.";
       deleteManual.checked = false;
       deleteDetails.replaceChildren();
       for (const text of [`Fanpage: ${data.target.page_name} (Page ${data.target.page_id})`, `Jenis: ${data.target.kind}`, `ID ${mode.idLabel} asli: ${data.target.target_id}`,
@@ -667,7 +675,7 @@
       link.rel = "noopener noreferrer";
       deleteDetails.appendChild(link);
       const scope = document.createElement("p");
-      scope.textContent = operationScope === "reel_video" ? "Target hanya satu objek video Reel asli." : "Operasi menargetkan Page Post, bukan jaminan menghapus objek foto/video/Reel secara terpisah.";
+      scope.textContent = "Operasi hanya menargetkan ID Page Post asli; penghapusan objek foto terpisah tidak dijamin.";
       deleteDetails.appendChild(scope);
       deleteDialog.showModal();
       deleteStatus.textContent = "Menunggu pemeriksaan manual dan Konfirmasi Hapus. Belum ada DELETE dikirim.";
@@ -685,7 +693,6 @@
     }
   }
   deleteButton.addEventListener("click", () => prepareDelete("page_post"));
-  deleteReelButton.addEventListener("click", () => prepareDelete("reel_video"));
 
   deleteManual.addEventListener("change", controls);
   deleteCancel.addEventListener("click", () => {
@@ -702,7 +709,7 @@
     if (!deletion || deleteExecuting || !deleteManual.checked || !connected || Date.now() < cooldownUntil || onePost()?.key !== deletion.target.key) return;
     const snapshot = deletion;
     const mode = deleteModes[snapshot.operationScope];
-    if (!mode || (snapshot.target.operation_scope || "page_post") !== snapshot.operationScope || snapshot.target.page_id !== fanpageSelect.value) return;
+    if (!mode || snapshot.operationScope !== "page_post" || (snapshot.target.operation_scope || "page_post") !== snapshot.operationScope || snapshot.target.page_id !== fanpageSelect.value) return;
     const generation = deleteGeneration;
     const pageId = fanpageSelect.value;
     deleteExecuting = true;
@@ -849,7 +856,7 @@
     for (const item of items.slice(bulkPreviewPage * DISPLAY_SIZE, (bulkPreviewPage + 1) * DISPLAY_SIZE)) {
       const row = document.createElement("details"); row.open = true;
       const summary = document.createElement("summary"); summary.textContent = `${item.supported ? "Didukung" : "DITOLAK"}: ${item.key}`; row.appendChild(summary);
-      bulkTarget(row, item); bulkLine(row, item.message || item.reason || "Target Page Post"); bulkDetails.appendChild(row);
+      bulkTarget(row, item); bulkLine(row, item.reason === "audit_scope_incompatible" ? "Audit lama tidak sesuai cakupan Post biasa/foto. Load Posts kembali." : item.message || item.reason || "Target Page Post"); bulkDetails.appendChild(row);
     }
     pageButtons(bulkPreviewPagination, bulkPreviewPage, Math.ceil(items.length / DISPLAY_SIZE), page => { bulkPreviewPage = page; renderBulkPreview(); });
   }
@@ -1005,6 +1012,7 @@
     try {
       const data = await api("/api/bulk-delete/prepare", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({selections:[{page_id:pageId,keys}]})});
       if (!connected || generation !== bulkGeneration || pageId !== fanpageSelect.value || previewGeneration !== bulkPreviewGeneration || !bulkPreparing) return;
+      if ((data.items || []).some(item => item.supported && item.operation_scope !== "page_post")) throw new Error("Cakupan preview tidak sesuai Post biasa/foto. Load Posts kembali.");
       bulkPrepared = data; bulkManual.checked = false; bulkPreviewPage = 0;
       renderBulkPreview();
       bulkDialog.showModal();
@@ -1067,7 +1075,7 @@
     postsLoading = true;
     controls();
     loadProgress.removeAttribute("value");
-    loadStatus.textContent = "Sedang memuat kandidat postingan, foto, video dan Reels serta memeriksa ID Story…";
+    loadStatus.textContent = "Sedang memuat Post teks/status/link dan foto; metadata video, Reel, Story dan yang tidak pasti dilewati.";
     operationStatus.textContent = "Load Posts sedang berjalan untuk Fanpage yang dipilih.";
     try {
       const current = () => generation === postsGeneration && connected && pageId === fanpageSelect.value;

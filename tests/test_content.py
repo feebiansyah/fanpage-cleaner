@@ -18,7 +18,7 @@ HEADERS = {"X-Fanpage-Client": "1", "Origin": "http://127.0.0.1:8000"}
 
 def post(n, date="2026-10-10T10:00:00+0000", **extra):
     return {"id": f"11_{n}", "from": {"id": "11"}, "is_published": True,
-            "created_time": date, "message": "Isi postingan", "status_type": "mobile_status_update",
+            "created_time": date, "message": "Isi postingan", "status_type": "mobile_status_update", "attachments": {"data": []},
             "permalink_url": f"https://www.facebook.com/11/posts/{n}", **extra}
 
 
@@ -113,31 +113,8 @@ class LoadContract(LoadFixture):
             self.error(await self.load(1, value), "invalid_page")
         self.assertEqual(len(self.calls), 0)
 
-    async def test_story_and_duplicate_removed_before_limit(self):
-        self.queues["stories"] = [response([{"id": "S1", "post_id": "11_1", "media_id": "900", "status": "PUBLISHED"}])]
-        self.queues["published_posts"] = [response([post(1), post(2), post(2)], "published_posts", "C2"), response([post(3)])]
-        result = await self.load(2)
-        self.assertEqual(result.status_code, 200)
-        self.assertEqual([item["object_id"] for item in result.json()["items"]], ["11_2", "11_3"])
-        self.assertGreaterEqual(result.json()["excluded_stories"], 1)
 
-    async def test_reels_merge_date_from_post_relation_and_global_sort(self):
-        self.queues["published_posts"] = [response([post(1, "2026-10-01T00:00:00Z"), post(2, "2026-10-12T00:00:00Z", status_type="added_video"), post(3, None)])]
-        self.queues["video_reels"] = [response([reel(900, "11_2"), reel(901)])]
-        result = await self.load(3)
-        data = result.json()
-        self.assertEqual(result.status_code, 200)
-        self.assertEqual(data["items"][0]["kind"], "Reel")
-        self.assertEqual(data["items"][0]["published_at"], "2026-10-12T00:00:00+00:00")
-        self.assertEqual(data["items"][0]["published_wib"], "12/10/2026 07:00:00 WIB")
-        self.assertEqual(len([i for i in data["items"] if any(s["object_id"] == "900" for s in i["sources"])]), 1)
-        self.assertEqual(data["found"], 4)
 
-    async def test_cross_source_without_proven_relation_not_silently_dropped(self):
-        self.queues["video_reels"] = [response([reel(900)])]
-        result = await self.load(100)
-        self.assertEqual(result.json()["displayed"], 2)
-        self.assertIn("cross_source_identity_unverified", result.json()["limitations"])
 
     async def test_same_date_stable_missing_date_not_updated_time(self):
         self.queues["published_posts"] = [response([post(2), post(1), post(3, None, updated_time="2099-01-01T00:00:00Z")])]
@@ -152,7 +129,7 @@ class LoadContract(LoadFixture):
         result = await self.load()
         self.assertEqual(result.json()["state"], "empty")
         self.assertTrue(result.json()["sources_exhausted"])
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.calls), 1)
         self.assertFalse(any(request.url.path.endswith("/stories") for request in self.calls))
 
     async def test_next_page_errors_are_partial_not_success(self):
@@ -166,20 +143,9 @@ class LoadContract(LoadFixture):
                 self.queues["video_reels"] = [response([])]
                 data = (await self.load(100)).json()
                 self.assertEqual(data["state"], "partial")
-                self.assertFalse(data["bulk_selectable"])
+                self.assertTrue(data["bulk_selectable"])
                 self.assertEqual(data["error"]["code"], cause)
 
-    async def test_story_or_reel_failure_cannot_claim_coverage(self):
-        for edge in ["stories", "video_reels"]:
-            with self.subTest(edge=edge):
-                self.queues = {"stories": [response([])], "published_posts": [response([post(1)])], "video_reels": [response([])]}
-                self.queues[edge] = [httpx.Response(403)]
-                data = (await self.load()).json()
-                self.assertEqual(data["state"], "partial")
-                self.assertFalse(data["coverage_complete"])
-                self.assertFalse(data["bulk_selectable"])
-                if edge == "stories":
-                    self.assertTrue(all(not i["selectable"] for i in data["items"]))
 
     async def test_owner_and_page_token_validation(self):
         self.error(await self.load(1, "999"), "page_not_owned")
@@ -235,7 +201,7 @@ class LoadContract(LoadFixture):
         self.queues["published_posts"] = [httpx.Response(200, json={"data": [post(1)], "paging": {"next": "https://evil.example/x?after=C1", "cursors": {"after": "C1"}}})]
         result = await self.load()
         self.assertEqual(result.json()["state"], "partial")
-        self.assertFalse(result.json()["bulk_selectable"])
+        self.assertTrue(result.json()["bulk_selectable"])
         self.queues["stories"] = [response([])]
         self.queues["published_posts"] = [httpx.Response(200, content=b"x" * 1048577)]
         self.queues["video_reels"] = [response([])]
@@ -259,14 +225,6 @@ class LoadContract(LoadFixture):
         data = (await self.load()).json()
         self.assertEqual([i["object_id"] for i in data["items"]], ["11_4"])
 
-    async def test_story_missing_cross_reference_disables_individual_selection(self):
-        self.queues["stories"] = [response([{"id": "123", "status": "PUBLISHED"}])]
-        data = (await self.load()).json()
-        self.assertEqual(data["state"], "source_exhausted")
-        self.assertIn("story_reference_unverified", data["limitations"])
-        self.assertTrue(data["retrieval_complete"])
-        self.assertFalse(data["bulk_selectable"])
-        self.assertTrue(all(not item["selectable"] for item in data["items"]))
 
     async def test_memory_capacity_before_meta_and_other_browser_cache_isolated(self):
         self.application.state.store.audits.settings = replace(self.settings, max_audit_entries=1)
@@ -304,7 +262,7 @@ class LoadContract(LoadFixture):
         self.assertEqual(data["limit"], 5000)
         self.assertEqual(data["displayed"], 1)
         self.assertEqual(data["state"], "source_exhausted")
-        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(len(self.calls), 1)
 
     async def test_page_bound_and_content_cooldown_no_more_meta(self):
         self.application.state.settings = replace(self.settings, posts_max_pages=1)
@@ -349,67 +307,19 @@ class LoadContract(LoadFixture):
         self.assertNotIn("tidak disimpan", data["error"]["message"])
         self.assertIn("parsial", data["error"]["message"])
 
-    async def test_story_only_media_reference_is_not_sufficient_for_posts(self):
-        self.queues["stories"] = [response([{"id": "123", "media_id": "900", "status": "PUBLISHED"}])]
-        data = (await self.load()).json()
-        self.assertEqual(data["state"], "source_exhausted")
-        self.assertIn("story_reference_unverified", data["limitations"])
-        self.assertTrue(all(not item["selectable"] for item in data["items"]))
 
 
 class EfficiencyContract(LoadFixture):
-    async def test_story_history_not_scanned_for_small_load(self):
-        self.queues["published_posts"] = [response([post(n) for n in range(1, 21)])]
-        self.queues["stories"] = [response([{"id": "900", "post_id": "11_900", "media_id": "901"}], "stories", "MORE")]
-        result = await self.load(20)
-        self.assertEqual(result.status_code, 200)
-        data = result.json()
-        self.assertEqual(data["state"], "limit_reached")
-        self.assertTrue(data["retrieval_complete"])
-        self.assertFalse(data["bulk_selectable"])
-        self.assertTrue(all(not item["selectable"] for item in data["items"]))
-        self.assertEqual([r.url.path.rsplit('/', 1)[-1] for r in self.calls], ["published_posts", "video_reels", "stories"])
-        self.assertEqual(len(self.calls), 3)
-        self.assertEqual(self.calls[-1].url.params["limit"], "20")
-        diag = next(s for s in data["sources"] if s["source"] == "stories")
-        self.assertEqual(diag["stop_reason"], "story_verification_budget")
 
     async def test_empty_candidates_need_no_story_request(self):
         self.queues["published_posts"] = [response([])]
         data = (await self.load(20)).json()
         self.assertEqual(data["state"], "empty")
         self.assertFalse(any(r.url.path.endswith('/stories') for r in self.calls))
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.calls), 1)
 
-    async def test_missing_story_reference_is_uncertainty_not_pagination_failure(self):
-        self.queues["stories"] = [response([{"id": "900", "post_id": "11_900"}])]
-        data = (await self.load(20)).json()
-        self.assertEqual(data["state"], "source_exhausted")
-        self.assertTrue(data["retrieval_complete"])
-        self.assertNotIn("error", data)
-        self.assertFalse(data["bulk_selectable"])
-        self.assertIn("story_reference_unverified", data["limitations"])
 
-    async def test_cross_dedup_before_stop_and_only_requested_relations(self):
-        self.queues["published_posts"] = [response([post(1), post(2)], "published_posts", "P2"), response([post(3)])]
-        self.queues["video_reels"] = [response([reel(900, "11_1"), reel(901, "11_2")], "video_reels", "R2"), response([reel(902, "11_3")])]
-        data = (await self.load(3)).json()
-        self.assertEqual(data["displayed"], 3)
-        self.assertEqual(data["found"], 3)
-        for request in self.calls:
-            if request.url.path.endswith('/video_reels'):
-                self.assertIn("post_id", request.url.params["fields"].split(','))
-            if request.url.path.endswith('/published_posts'):
-                self.assertNotIn("object_id", request.url.params["fields"].split(','))
-        self.assertGreater(len([r for r in self.calls if r.url.path.endswith('/published_posts')]), 1)
 
-    async def test_cross_alias_duplicates_cannot_pretend_source_exhausted(self):
-        self.queues["published_posts"] = [response([post(1)])]
-        self.queues["video_reels"] = [response([reel(900, "11_1"), reel(901, "11_1"), reel(902, "11_1")], "video_reels", "R2"),
-            response([reel(903, "11_2"), reel(904, "11_3")])]
-        data = (await self.load(3)).json()
-        self.assertEqual(data["displayed"], 3)
-        self.assertEqual(len([r for r in self.calls if r.url.path.endswith('/video_reels')]), 2)
 
     async def test_request_counts_retry_and_safe_source_errors(self):
         self.queues["published_posts"] = [httpx.Response(503), response([post(1)], "published_posts", "P2"), httpx.Response(403)]
@@ -447,8 +357,8 @@ class EfficiencyContract(LoadFixture):
         self.queues["published_posts"] = [response([post(n) for n in range(1, 11)], "published_posts", "P2"), response([post(n) for n in range(11, 21)])]
         data = (await self.load(20)).json()
         self.assertEqual(data["displayed"], 20)
-        self.assertEqual(sum(s["requests"] for s in data["sources"]), 4)
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(sum(s["requests"] for s in data["sources"]), 2)
+        self.assertEqual(len(self.calls), 2)
 
     async def test_retry_after_and_fatal_error_stop_correct_sources(self):
         for issue, reason, attempts in [(httpx.Response(503, headers={"Retry-After": "30"}), "cooldown", 1),
@@ -460,12 +370,9 @@ class EfficiencyContract(LoadFixture):
                 self.queues["published_posts"] = [issue] * 3
                 before = len(self.calls)
                 data = (await self.load(20)).json()
-                first, second, story = data["sources"]
+                first, = data["sources"]
                 self.assertEqual(first["stop_reason"], reason)
                 self.assertEqual(first["requests"], attempts)
-                self.assertEqual(second["status"], "cancelled")
-                self.assertEqual(second["requests"], 0)
-                self.assertEqual(story["requests"], 0)
                 self.assertEqual(len(self.calls) - before, attempts)
                 self.assertNotIn(PAGE_TOKEN, str(data["sources"]) + str(data["errors"]))
 
@@ -497,13 +404,6 @@ class EfficiencyContract(LoadFixture):
         self.assertEqual(result.json()["sources"][0]["requests"], 1)
         self.assertTrue(all(source["stop_reason"] == "load_cancelled" for source in result.json()["sources"]))
 
-    async def test_story_ids_still_excluded_from_available_references(self):
-        self.queues["stories"] = [response([{"id": "900", "post_id": "11_1"}])]
-        self.queues["published_posts"] = [response([post(1), post(2)])]
-        data = (await self.load(20)).json()
-        self.assertEqual([item["object_id"] for item in data["items"]], ["11_2"])
-        self.assertFalse(data["items"][0]["selectable"])
-        self.assertNotIn("error", data)
 
     async def test_exhausted_server_retries_are_not_invalid_response(self):
         self.queues["published_posts"] = [httpx.Response(503)] * 3
@@ -513,3 +413,83 @@ class EfficiencyContract(LoadFixture):
         self.assertEqual(diagnostic["stop_reason"], "upstream_error")
         self.assertEqual(diagnostic["status"], "failed")
         self.assertEqual(data["state"], "partial")
+
+
+class SupportedScopeContract(LoadFixture):
+    async def test_filtered_pages_fill_unique_limit_only_from_published_posts(self):
+        self.queues['published_posts'] = [
+            response([post(1, status_type='added_video'), post(2), post(2)], 'published_posts', 'P2'),
+            response([post(3, attachments={'data':[{'type':'video'}]}), post(4)], 'published_posts', 'P3'),
+            response([post(5)])]
+        data = (await self.load(3)).json()
+        self.assertEqual([i['object_id'] for i in data['items']], ['11_2','11_4','11_5'])
+        self.assertEqual(data['sources'][0]['skipped'], 2)
+        self.assertEqual(data['sources'][0]['skip_reasons'], {'unsupported_status_type':1,'unsupported_attachment_type':1})
+        self.assertEqual([r.url.path.rsplit('/',1)[-1] for r in self.calls], ['published_posts']*3)
+
+    async def test_album_link_and_unknown_or_truncated_media(self):
+        album = {'data':[{'type':'album','subattachments':{'data':[{'type':'photo'},{'type':'photo'}]}}]}
+        mixed = {'data':[{'type':'album','subattachments':{'data':[{'type':'photo'},{'type':'video'}]}}]}
+        truncated = {'data':[{'type':'photo'}], 'paging':{'next':'https://example.com/?access_token='+PAGE_TOKEN}}
+        self.queues['published_posts'] = [response([
+            post(1, status_type='added_photos', attachments=album),
+            post(2, status_type='shared_story', attachments={'data':[{'type':'share'}]}),
+            post(3, status_type='added_photos', attachments=mixed),
+            post(4, attachments={'data':[{'type':'unknown'}]}),
+            post(5, status_type='added_photos', attachments=truncated),
+            post(6, status_type='story'),
+            post(7, status_type='added_photos', attachments={'data':[{'type':'album'}]})])]
+        data = (await self.load(20)).json()
+        self.assertEqual([i['object_id'] for i in data['items']], ['11_1','11_2'])
+        self.assertEqual(data['sources'][0]['skipped'], 5)
+        self.assertNotIn(PAGE_TOKEN, str(data))
+        self.assertEqual(data['items'][0]['kind'], 'Foto')
+
+    async def test_nested_attachment_metadata_contains_no_external_secrets(self):
+        self.queues['published_posts'] = [response([post(1, status_type='added_photos', attachments={'data':[{'type':'photo','url':PAGE_TOKEN,'title':USER_TOKEN}]})])]
+        data = (await self.load(1)).json()
+        self.assertEqual(data['items'][0]['scope_metadata']['attachments'], {'data':[{'type':'photo'}]})
+        self.assertNotIn(PAGE_TOKEN, str(data))
+        self.assertNotIn(USER_TOKEN, str(data))
+
+    async def test_missing_attachments_and_foreign_identity_rejected_numeric_id_retained(self):
+        missing = post(1)
+        missing.pop('attachments')
+        self.queues['published_posts'] = [response([missing, post(2,id='22_2'), post(3,id='333')])]
+        data = (await self.load(20)).json()
+        self.assertEqual([i['object_id'] for i in data['items']], ['333'])
+        self.assertEqual(data['sources'][0]['skipped'],2)
+        self.assertEqual(data['sources'][0]['skip_reasons'], {'unknown_attachments':1,'unverified_owner_or_identity':1})
+
+    async def test_legacy_classifier_requires_real_provenance(self):
+        from post_scope import scope_decision
+        item = {'page_id':'11','object_id':'11_1','kind':'Postingan','post_status_type':'mobile_status_update','sources':[{'source':'published_posts','object_id':'11_1'}]}
+        self.assertEqual(scope_decision(item),'unknown_scope')
+        item['sources'].append({'source':'video_reels','object_id':'999'})
+        self.assertEqual(scope_decision(item),'ambiguous_provenance')
+
+    async def test_malformed_classification_fields_are_skipped_safely(self):
+        self.queues['published_posts'] = [response([
+            post(1, status_type={}), post(2, status_type=[]),
+            post(3, attachments={'data':[{'type':{'secret':PAGE_TOKEN}}]}),
+            post(4, attachments={'data':[{'type':[]}]}), post(5)])]
+        data = (await self.load(20)).json()
+        self.assertEqual(data['state'], 'source_exhausted')
+        self.assertEqual([i['object_id'] for i in data['items']], ['11_5'])
+        self.assertEqual(data['sources'][0]['skip_reasons'], {'unsupported_status_type':2,'unknown_attachment_type':2})
+        from post_scope import scope_decision, attachment_metadata
+        candidate = data['items'][0]
+        for malformed in ({}, []):
+            self.assertEqual(scope_decision({**candidate,'kind':malformed}), 'unknown_scope')
+            self.assertEqual(scope_decision({**candidate,'scope_metadata':{'status_type':'mobile_status_update','attachments':{'data':[{'type':malformed}]}}}), 'unknown_attachment_type')
+        self.assertEqual(attachment_metadata({'data':[{'type':{'secret':PAGE_TOKEN}}]}), {'data':[{'type':None}]})
+
+    async def test_complete_photo_and_link_supported_video_mix_rejected(self):
+        self.queues['published_posts'] = [response([
+            post(1,attachments={'data':[{'type':'photo'},{'type':'link'}]}),
+            post(2,attachments={'data':[{'type':'photo'},{'type':'video'}]}),
+            post(3,status_type='added_photos',attachments={'data':[{'type':'link'}]})])]
+        data = (await self.load(20)).json()
+        self.assertEqual([i['object_id'] for i in data['items']],['11_1'])
+        self.assertEqual(data['items'][0]['kind'],'Foto')
+        self.assertEqual(data['sources'][0]['skip_reasons'],{'unsupported_attachment_type':1,'unknown_attachments':1})

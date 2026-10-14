@@ -376,13 +376,13 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
 
     @application.post('/api/reels/delete/prepare')
     async def prepare_single_reel(request: Request):
-        payload=await single_delete_body(request)
-        return application.state.single_delete.prepare(request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload,'reel_video')
+        check_origin(request,settings,mutation=True)
+        raise AppError('post_scope_unsupported',409)
 
     @application.post('/api/reels/delete/execute')
     async def execute_single_reel(request: Request):
-        payload=await single_delete_body(request)
-        return await application.state.single_delete.execute(application.state.graph,request.cookies.get(BROWSER_COOKIE),request.cookies.get(SESSION_COOKIE),payload,'reel_video')
+        check_origin(request,settings,mutation=True)
+        raise AppError('post_scope_unsupported',409)
 
     @application.post('/api/bulk-delete/prepare')
     async def prepare_bulk_delete(request: Request):

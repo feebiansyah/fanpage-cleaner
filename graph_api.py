@@ -78,10 +78,7 @@ class GraphClient:
         self.store = store
 
     async def delete_reel_once(self, target_id, token_key, deadline, token_at_dispatch, observation=None):
-        """User-authorized ONE Reel experiment; existing strict criterion, not verified Reel contract."""
-        if not isinstance(target_id,str) or not re.fullmatch(r'[0-9]{1,40}',target_id):
-            raise AppError('reel_identity_ambiguous',409)
-        return await self.delete_post_once(target_id,token_key,deadline,token_at_dispatch,observation)
+        raise AppError('post_scope_unsupported',409)
 
     async def delete_post_once(self, target_id, token_key, deadline, token_at_dispatch, observation=None):
         """Strict v26 Page Post contract. One send; never calls the GET retry helper."""
@@ -348,7 +345,7 @@ class GraphClient:
         return await self._get(token, token_key, endpoint, params, deadline)
 
     async def content_page(self, page_id, edge, fields, token, token_key, limit, cursor, deadline, extra=None, on_request=None):
-        if edge not in {"published_posts", "video_reels", "stories"} or not re.fullmatch(r"[0-9]{1,40}", page_id):
+        if edge != "published_posts" or not re.fullmatch(r"[0-9]{1,40}", page_id):
             raise AppError("invalid_page")
         endpoint = "https://graph.facebook.com/" + self.settings.graph_version + "/" + page_id + "/" + edge
         params = {"fields": fields, "limit": str(limit), **(extra or {})}

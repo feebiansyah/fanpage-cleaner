@@ -20,7 +20,7 @@ TOKEN = 'dummy-page-secret'
 def item():
     return {'key': 'published_posts:11_123', 'page_id': '11', 'object_id': '11_123',
             'sources': [{'source': 'published_posts', 'object_id': '11_123'}],
-            'kind': 'Postingan', 'post_status_type':'mobile_status_update', 'text': 'Post yang diperiksa', 'published_wib': '10/10/2026 17:00:00 WIB',
+            'kind': 'Postingan', 'post_status_type':'mobile_status_update', 'scope_metadata':{'status_type':'mobile_status_update','attachments':{'data':[]}}, 'text': 'Post yang diperiksa', 'published_wib': '10/10/2026 17:00:00 WIB',
             'published_at': '2026-10-10T10:00:00+00:00', 'permalink': 'https://www.facebook.com/11/posts/123',
             'selectable': True}
 
@@ -384,38 +384,46 @@ class SingleDelete(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.prepare()).json()['error']['code'],'delete_capacity')
         self.assertEqual(self.calls, [])
 
-    async def test_page_post_subtypes_and_missing_status_use_original_post_id(self):
-        from test_content import post
-        for status in ['mobile_status_update', None, 'unrecognized_type', 'added_photos', 'added_video', 'shared_story']:
-            raw = post(123, status_type=status)
-            normalized = self.app.state.jobs.loader._normalize(raw, 'published_posts', '11', [])
-            normalized.pop('_date')
-            self.audit['items'] = [normalized]
+    async def test_supported_post_types_keep_original_id_and_unknown_types_reject(self):
+        cases=[('mobile_status_update',[],True),('added_photos',[{'type':'photo'}],True),
+               ('shared_story',[{'type':'share'}],True),
+               (None,[],False),('unrecognized_type',[],False),('added_video',[{'type':'video'}],False)]
+        for status,attachments,supported in cases:
+            self.audit['items']=[{**item(),'scope_metadata':{'status_type':status,'attachments':{'data':attachments}}}]
             self.seed()
-            prepared = await self.prepare()
-            self.assertEqual(prepared.status_code,200,prepared.text)
-            self.assertEqual(prepared.json()['target']['target_id'],'11_123')
-        self.assertEqual(self.calls, [])
+            prepared=await self.prepare()
+            self.assertEqual(prepared.status_code,200 if supported else 409,prepared.text)
+            if supported:
+                self.assertEqual(prepared.json()['target']['target_id'],'11_123')
+        self.assertEqual(self.calls,[])
 
-    async def test_merged_reel_uses_only_verified_published_post_id_not_media_id(self):
+    async def test_legacy_audit_and_confirmation_require_reload_without_dispatch(self):
+        self.audit['items'][0].pop('scope_metadata')
+        self.seed()
+        response=await self.prepare()
+        self.assertEqual(response.status_code,409,response.text)
+        self.assertEqual(response.json()['error']['code'],'audit_scope_incompatible')
+        self.audit['items']=[item()]
+        self.seed()
+        cid=(await self.prepare()).json()['confirmation_id']
+        self.app.state.single_delete.confirmations[cid].target.pop('scope_version')
+        response=await self.execute(cid)
+        self.assertEqual(response.status_code,409,response.text)
+        self.assertEqual(response.json()['error']['code'],'audit_scope_incompatible')
+        self.assertEqual(self.calls,[])
+
+    async def test_merged_reel_provenance_rejected_without_delete(self):
         self.audit['items'] = [{**item(), 'kind':'Reel', 'object_id':'987',
             'sources':[{'source':'published_posts','object_id':'11_123'},
                        {'source':'video_reels','object_id':'987','post_id':'11_123'}]}]
         self.seed()
-        prepared = await self.prepare()
-        self.assertEqual(prepared.status_code,200,prepared.text)
-        data = prepared.json()
-        self.assertEqual(data['target']['target_id'],'11_123')
-        self.assertEqual(data['target']['operation_scope'],'page_post')
-        self.assertFalse(data['target']['media_deletion_guaranteed'])
-        result = await self.execute(data['confirmation_id'])
-        self.assertEqual(result.json()['outcome'],'succeeded')
-        self.assertEqual(self.calls[0].url.path,'/v26.0/11_123')
+        self.assertEqual((await self.prepare()).status_code,409)
+        self.assertEqual(self.calls,[])
 
     async def test_rejection_reasons_missing_post_ambiguous_story_and_expired_audit(self):
         cases = [
-            ({'kind':'Reel','object_id':'987','sources':[{'source':'video_reels','object_id':'987'}]}, 'page_post_missing'),
-            ({'sources':[{'source':'video_reels','object_id':'987','post_id':'11_123'}]}, 'page_post_missing'),
+            ({'kind':'Reel','object_id':'987','sources':[{'source':'video_reels','object_id':'987'}]}, 'post_identity_ambiguous'),
+            ({'sources':[{'source':'video_reels','object_id':'987','post_id':'11_123'}]}, 'post_identity_ambiguous'),
             ({'sources':[{'source':'published_posts','object_id':'11_123'},{'source':'published_posts','object_id':'11_124'}]}, 'post_identity_ambiguous'),
             ({'kind':'Story'},'identified_story'),
             ({'identified_story':True},'identified_story'),
@@ -460,10 +468,6 @@ class SingleDelete(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.execute(cid)).json()['outcome'],'succeeded')
         self.assertEqual(self.app.state.jobs.snapshot(job)['items'], [])
         self.assertEqual(self.store.audits.get(other_sid,'11')['items'], [])
-        # Another old page entering a job cannot restore the tombstoned candidate.
-        job.sources[1].candidates['456'] = self.app.state.jobs.loader._normalize(reel(456,'11_123'),'video_reels','11',[])
-        self.assertEqual(self.app.state.jobs.snapshot(job)['items'], [])
-
     async def test_response_size_bound_and_actual_request_timeout_no_retry(self):
         self.app.state.graph.settings = Settings(graph_request_interval=.001, max_response_bytes=16, request_timeout=.02)
         cid = (await self.prepare()).json()['confirmation_id']

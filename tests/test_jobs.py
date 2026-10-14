@@ -44,11 +44,11 @@ class JobContract(LoadFixture):
             steps += 1
         self.assertGreater(steps, 1)
         self.assertEqual(state['displayed'], 3000)
-        self.assertEqual(state['request_count'], 32)
+        self.assertEqual(state['request_count'], 30)
         requests = [r for r in self.calls if r.url.path.endswith('/published_posts')]
         self.assertNotIn('after', requests[0].url.params)
         self.assertEqual([r.url.params['after'] for r in requests[1:]], [str(n) for n in range(100,3000,100)])
-        self.assertEqual(len([r for r in self.calls if r.url.path.endswith('/video_reels')]), 1)
+        self.assertEqual(len([r for r in self.calls if r.url.path.endswith('/video_reels')]), 0)
 
     async def test_replayed_and_concurrent_step_does_not_acquire_twice(self):
         entered, release = asyncio.Event(), asyncio.Event()
@@ -64,6 +64,9 @@ class JobContract(LoadFixture):
         await asyncio.sleep(.01)
         release.set()
         a, b = await asyncio.gather(first, second)
+        for key in ('cache_ttl_seconds','job_remaining_seconds'):
+            a.pop(key,None)
+            b.pop(key,None)
         self.assertEqual(a, b)
         before = len(self.calls)
         replay = await self.step(state)
@@ -80,7 +83,7 @@ class JobContract(LoadFixture):
             await asyncio.sleep(.1)
             return response([])
         self.queues['published_posts'] = [response([post(1)], 'published_posts', 'P2'), response([post(2)])]
-        self.queues['video_reels'] = [slow, response([])]
+        self.queues['published_posts'] = [response([post(1)], 'published_posts', 'P2'), slow, response([post(2)])]
         state = await self.step(await self.start(20))
         self.assertFalse(state['terminal'])
         self.assertEqual(state['displayed'], 1)
@@ -88,7 +91,7 @@ class JobContract(LoadFixture):
         state = await self.finish(state)
         self.assertEqual(state['displayed'], 2)
         requests = [r for r in self.calls if r.url.path.endswith('/published_posts')]
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 3)
         self.assertEqual(requests[1].url.params['after'], 'P2')
 
     async def test_meta_timeout_preserves_pages_and_has_distinct_reason(self):
@@ -111,17 +114,6 @@ class JobContract(LoadFixture):
         self.application.state.store.token_cooldowns.clear()
         state = await self.finish(state)
         self.assertEqual(state['displayed'], 1)
-
-    async def test_story_partial_identity_removed_audit_not_delete(self):
-        self.queues['published_posts'] = [response([post(1), post(2)])]
-        self.queues['stories'] = [response([{'id':'900', 'post_id':'11_1'}], 'stories', 'S2')]
-        state = await self.finish(await self.start(20))
-        self.assertEqual([i['object_id'] for i in state['items']], ['11_2'])
-        self.assertTrue(state['items'][0]['selectable'])
-        self.assertTrue(state['bulk_selectable'])
-        self.assertFalse(state['safe_for_delete'])
-        self.assertEqual(state['story_exclusion'], 'unverified')
-        self.assertIn('story_probe_incomplete', state['limitations'])
 
     async def test_stop_is_idempotent_preserves_audit_prevents_next_requests(self):
         self.application.state.jobs.settings = replace(self.settings, posts_step_requests=1)
@@ -192,10 +184,10 @@ class JobContract(LoadFixture):
         self.queues['video_reels']=[response([reel(901,'11_1'),reel(902)])]
         state=await self.finish(await self.start(3))
         self.assertEqual(state['displayed'],3)
-        self.assertEqual(state['dated_count'],1)
-        self.assertEqual(state['undated_count'],2)
+        self.assertEqual(state['dated_count'],2)
+        self.assertEqual(state['undated_count'],1)
         self.assertEqual(state['items'][0]['object_id'],'11_1')
-        self.assertEqual(state['items'][0]['kind'],'Reel')
+        self.assertEqual(state['items'][0]['kind'],'Postingan')
         self.assertNotIn(PAGE_TOKEN,str(state))
         self.assertNotIn('cursor',str(state))
         self.assertFalse(state['safe_for_delete'])
@@ -302,7 +294,7 @@ class JobContract(LoadFixture):
         state=await self.step(await self.start(20))
         async def broken(request):
             raise RuntimeError(PAGE_TOKEN)
-        self.queues['video_reels']=[broken]
+        self.queues['published_posts']=[broken]
         state=await self.finish(state)
         self.assertEqual(state['state'],'partial')
         self.assertEqual(state['displayed'],1)
@@ -349,3 +341,31 @@ class JobContract(LoadFixture):
         self.assertFalse(self.application.state.store.audits.reservations)
         self.assertEqual(self.application.state.store.active_jobs,0)
         self.assertEqual(len(self.calls),1)
+
+
+    async def test_filtered_album_and_unknown_pages_resume_to_unique_limit(self):
+        self.application.state.jobs.settings = replace(self.settings, posts_step_requests=1)
+        album = {'data':[{'type':'album','subattachments':{'data':[{'type':'photo'}]}}]}
+        self.queues['published_posts'] = [response([post(1, status_type='added_video'),post(2),post(2)], 'published_posts','P2'), response([post(3, attachments={'data':[{'type':'reel'}]}),post(4,status_type='added_photos',attachments=album)])]
+        state = await self.finish(await self.start(2))
+        self.assertEqual([i['object_id'] for i in state['items']], ['11_2','11_4'])
+        self.assertEqual(state['request_count'],2)
+        self.assertEqual(state['sources'][0]['skipped'],2)
+        self.assertEqual(state['sources'][0]['skip_reasons'], {'unsupported_status_type':1,'unsupported_attachment_type':1})
+        self.assertEqual([r.url.path.rsplit('/',1)[-1] for r in self.calls],['published_posts']*2)
+
+    async def test_malformed_scope_metadata_does_not_fail_job(self):
+        self.queues['published_posts'] = [response([post(1,status_type={}),post(2,attachments={'data':[{'type':[]}]}),post(3)])]
+        state = await self.finish(await self.start(20))
+        self.assertEqual(state['state'],'source_exhausted')
+        self.assertEqual([i['object_id'] for i in state['items']],['11_3'])
+        self.assertEqual(state['sources'][0]['skip_reasons'],{'unsupported_status_type':1,'unknown_attachment_type':1})
+        self.assertEqual(state['errors'],[])
+
+    async def test_photo_link_supported_and_photo_video_mix_rejected(self):
+        self.queues['published_posts'] = [response([
+            post(1,attachments={'data':[{'type':'photo'},{'type':'share'}]}),
+            post(2,attachments={'data':[{'type':'photo'},{'type':'video'}]})])]
+        state = await self.finish(await self.start(20))
+        self.assertEqual([i['object_id'] for i in state['items']],['11_1'])
+        self.assertEqual(state['sources'][0]['skip_reasons'],{'unsupported_attachment_type':1})
