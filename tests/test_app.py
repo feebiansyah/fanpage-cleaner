@@ -205,11 +205,13 @@ class ConnectionContract(unittest.IsolatedAsyncioTestCase):
             self.error(await self.connect(other), "cooldown")
         self.assertEqual(len(self.calls), 1)
 
-    async def test_app_usage_high_sets_global_cooldown_and_missing_header_unknown(self):
+    async def test_app_usage_high_adapts_pacing_without_global_cooldown(self):
         self.responses = [httpx.Response(200, headers={"X-App-Usage": '{"call_count":95,"total_time":2,"total_cputime":1}'}, json={"data": [page()]})]
         self.assertEqual((await self.connect()).status_code, 200)
-        self.error(await self.connect(), "cooldown")
-        self.assertEqual(len(self.calls), 1)
+        store=self.application.state.store
+        self.assertEqual(store.global_cooldown_until,0)
+        self.assertEqual(store.token_cooldowns,{})
+        self.assertGreater(store.governor.interval,self.settings.graph_request_interval)
 
     async def test_retry_after_long_and_http_date_no_early_retry(self):
         for header in ["30", format_datetime(datetime.now(timezone.utc) + timedelta(seconds=60), usegmt=True)]:
@@ -490,8 +492,10 @@ class ConnectionContract(unittest.IsolatedAsyncioTestCase):
             '{"123":[{"type":"pages","call_count":95,"total_time":1,"total_cputime":1,"estimated_time_to_regain_access":0}]}'}, json={"data": [page()]})]
         self.assertEqual((await self.connect()).status_code, 200)
         before = len(self.calls)
-        self.error(await self.connect(), "cooldown")
-        self.assertEqual(len(self.calls), before)
+        self.responses=[httpx.Response(200,json={'data':[page()]})]
+        self.assertEqual((await self.connect()).status_code,200)
+        self.assertEqual(len(self.calls),before+1)
+        self.assertFalse(self.application.state.store.governor.usage_known)
 
     async def test_cursor_mismatch_duplicate_and_invalid_cursor(self):
         for link in ["https://graph.facebook.com/v26.0/me/accounts?after=OTHER",

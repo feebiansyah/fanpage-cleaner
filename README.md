@@ -191,7 +191,7 @@ Antrean terpusat satu proses memakai round robin antar Page, dengan kunci **cano
 
 RequestGovernor dibagi oleh Graph GET koneksi/load dan dispatch pemeriksaan dry run. Default jarak awal **1 detik** antar percobaan, tanpa burst, concurrency global **2**, maksimum lokal 8 serta tidak melebihi pool HTTP. Pemeriksaan dry run menggunakan permit pacing lokal tetapi **tidak mengirim request Meta**. Enam request per langkah Load Posts adalah budget langkah, bukan rate limiter. Test fixtures memakai interval kecil agar suite cepat; tes rate menggunakan interval terukur tersendiri.
 
-Header penggunaan valid di atas 50% menambah interval menjadi setidaknya dua kali interval awal, di atas 80% empat kali (dibatasi GRAPH_MAX_INTERVAL=10 detik). Ambang tahap 2 90% tetap memasang cooldown konservatif. Tidak ada percepatan otomatis setelah request sukses. Header tidak tersedia berarti penggunaan/kuota tidak diketahui, bukan nol. Retry-After dan cooldown store bersama tetap berlaku; rate limit scope tidak diketahui memakai global konservatif. Dry run/fake executor rate limit memasang cooldown sebelum melepas permit agar worker lain menghormatinya. Tidak ada rotasi token/IP/perangkat atau klaim bebas limit.
+Pacing adaptif dan metadata cooldown dijelaskan pada bagian retry/usage di bawah. Header hilang bukan usage nol; hanya observasi lengkap yang membaik dapat menurunkan interval. Dua worker, governor bersama dan DELETE satu kali tetap berlaku. Dry run/fake executor tetap memasang cooldown sebelum melepas permit ketika diklasifikasikan rate limit.
 
 Konfigurasi: DRY_WORKERS=2, GRAPH_REQUEST_CONCURRENCY=2, GRAPH_REQUEST_INTERVAL=1, GRAPH_MAX_INTERVAL=10, DRY_MAX_JOBS=100, DRY_MAX_TARGETS=50000, DRY_MAX_BYTES=134217728, DRY_JOB_TTL=1200, DRY_MAX_EVENTS=100, DRY_BODY_BYTES=8388608. Body pilihan Dry Run maksimal 8 MiB; prepare bulk maksimal 1 MiB. Input token dan konfirmasi tetap memakai batas kecil.
 
@@ -392,7 +392,7 @@ Jika port server berubah, port `APP_ORIGIN` juga harus berubah. Untuk HTTPS loop
 | `MAX_BODY_BYTES` / `MAX_TOKEN_LENGTH` | `16384` / `8192` | Maksimal 16 KiB JSON / 8.192 karakter token, termasuk chunked body |
 | `RETRY_BASE` / `RETRY_JITTER` | `0.5` / `0.25` detik | Exponential backoff + jitter; maksimal dua retry per request |
 | `MAX_RETRY_WAIT` | `5` detik | Instruksi tunggu lebih lama menjadi cooldown, tanpa retry dini |
-| `COOLDOWN_SECONDS` / `USAGE_THRESHOLD` | `60` detik / `90` | Cooldown lokal minimal untuk rate limit/usage tinggi |
+| `COOLDOWN_SECONDS` / `USAGE_THRESHOLD` | `60` detik / `90` | Minimum rate limit dan satu jeda saturasi; 90 adalah ambang pacing |
 
 Nilai ini adalah **batas konservatif aplikasi, bukan kuota resmi Meta** dan tidak menjamin bebas rate limit Facebook. Refresh tidak memperpanjang TTL sesi. Kapasitas limiter penuh ditolak. Key cooldown token memakai HMAC dengan salt acak per proses, bukan raw token. Bila tabel cooldown penuh, gunakan cooldown global konservatif tanpa menghapus cooldown aktif.
 
@@ -402,7 +402,15 @@ Retry hanya untuk gangguan transport sementara, HTTP 500/502/503/504, atau error
 
 `Retry-After` valid berupa detik nonnegatif atau HTTP-date dihormati. Jika lebih lama dari 5 detik atau sisa deadline, operasi berhenti dan cooldown mempertahankan durasi instruksi tersebut; tidak dipotong agar retry lebih awal. Instruksi pendek ditunggu sebelum retry. Header rusak diabaikan dan backoff lokal tetap berlaku. Frontend tidak otomatis retry.
 
-Rate limit yang diklasifikasikan sebagai user (kode 17) memakai lingkup HMAC token; app/Page/lingkup tidak diketahui memakai cooldown seluruh proses. Header `X-App-Usage` dan `X-Business-Use-Case-Usage`, bila tersedia, diperiksa pada field numerik `call_count`, `total_time`, `total_cputime`. Nilai ≥ ambang lokal memicu cooldown global konservatif. Header tidak ada/rusak berarti **penggunaan tidak diketahui**, bukan nol. `estimated_time_to_regain_access` tidak diinterpretasikan karena satuan/aturan endpoint ini belum terverifikasi; aplikasi tidak mengarang waktu reset resmi.
+Cooldown dari `Retry-After`, HTTP 429 dan kode rate-limit dicatat terpisah dari jeda kebijakan lokal. Instruksi Meta tidak diperpendek oleh observasi usage yang membaik. Scope memakai HMAC token terkait; browser dengan token sama berbagi jeda. Aplikasi belum memiliki pemetaan App ID/business bucket yang tervalidasi, sehingga tidak menganggap header tertentu sebagai perintah menghentikan seluruh token yang tidak terkait. Pacing GET/DELETE tetap global untuk seluruh browser.
+
+Header `x-app-usage` dibaca sebagai object dengan `call_count`, `total_time`, `total_cputime`; `x-business-use-case-usage` sebagai object ID numerik ke array bucket bertipe. Hanya nilai numerik valid disimpan, tanpa header mentah, ID bucket atau token pada diagnosis. Contoh struktur berasal dari [koleksi resmi Meta di Postman](https://www.postman.com/meta/whatsapp-business-platform/documentation/3kru5r6/moved-whatsapp-business-management-api); contoh produk WhatsApp ini tidak membuktikan ketersediaan header atau scope limit setiap endpoint Page. [Referensi rate limiting Meta](https://developers.facebook.com/docs/graph-api/overview/rate-limiting/) terhalang HTTP 429 saat diperiksa. `estimated_time_to_regain_access` tidak diinterpretasikan karena satuan/aturan endpoint ini belum terverifikasi.
+
+Kebijakan lokal: usage >=90% meningkatkan interval minimal 6x pacing awal dan bertahap 25%, maksimal `GRAPH_MAX_INTERVAL` (default 10 detik). Usage 50-79% mempertahankan minimal 2x, 80-89% minimal 4x. Usage >=100% memberi satu jeda lokal `COOLDOWN_SECONDS` (default 60 detik) per episode saturasi, lalu melanjutkan pada pacing maksimum; respons sukses tinggi berikutnya tidak mengulang jeda tetap. Episode diaktifkan kembali setelah observasi bucket turun di bawah ambang 90% atau observasinya tidak lagi segar (5 menit). Rate limit nyata tetap dapat menjeda lagi sesuai instruksi/kebijakan minimum.
+
+Interval turun 20% bertahap setelah tiga respons baru dengan seluruh metrik yang diketahui lengkap dan <50%; tidak turun di bawah pacing awal. Header hilang, rusak, atau metrik parsial bukan usage nol dan tidak memberi suara pemulihan. Bucket lain yang masih tinggi menahan pemulihan. Ini kebijakan aplikasi, bukan kuota resmi Meta; default dua worker tetap berlaku. Riwayat bucket dibatasi MAX_TOKEN_ENTRIES; jika penuh, bucket baru mempertahankan pacing maksimum dan tidak memasang jeda lokal berulang tanpa state episode. Cooldown rate limit nyata tetap berlaku.
+
+Progres menampilkan alasan singkat seperti ?Penggunaan API tinggi? atau ?Meta meminta menunggu?. Detail tertutup mencatat sumber header/kode, scope, akhir jeda UTC, nilai usage, interval, dan jeda terakhir yang tersimpan di memori. Diagnosis tidak menyimpan token/header mentah ke checkpoint. Tidak ada GET khusus untuk memeriksa usage. Penyebab percobaan nyata 40 sukses/60 queued belum dapat dipastikan tanpa metadata runtime; tes mock membuktikan perbaikan kebijakan, bukan keadaan kuota akun tersebut.
 
 ## Sumber Meta dan keterbatasan verifikasi
 
@@ -467,3 +475,6 @@ Invoke-RestMethod http://127.0.0.1:8000/api/session -Headers @{'X-Fanpage-Client
 - `requirements.txt`, `.gitignore`: versi paket dan pengecualian rahasia/cache/runtime.
 
 Modul tahap 4: bulk_targets.py (identitas/kelayakan), bulk_queue.py (antrean/fairness/ownership), bulk_scheduler.py (worker), bulk_executor.py (dry run/kontrak), bulk_checkpoint.py (ledger atomik), request_governor.py (pacing/concurrency bersama). Regresi tambahan: tests/test_bulk.py; rancangan: docs/stage4-plan.md.
+
+
+Verifikasi perbaikan cooldown: 236 tes backend dan 77 tes frontend lulus; 13 tes khusus usage/cooldown mencakup respons sukses tinggi berulang, pemulihan, header hilang/rusak/parsial, kapasitas bucket, Retry-After, HTTP 429, scope token bersama dan diagnosis aman. Uji mock kapasitas 5000 target sempat melewati deadline 120 detik pada regresi awal; uji kapasitas terpisah dan regresi lengkap terakhir lulus tanpa menaikkan deadline. Sintaks Python/JavaScript dan git diff --check lulus. Semua request pengujian memakai mock/token dummy; agen tidak melakukan DELETE Facebook nyata.

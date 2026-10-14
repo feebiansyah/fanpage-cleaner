@@ -7,6 +7,7 @@ import secrets
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from config import Settings
 from errors import AppError
@@ -59,6 +60,7 @@ class MemoryStore:
         self.browsers: dict[str, Browser] = {}
         self.token_cooldowns: dict[str, float] = {}
         self.global_cooldown_until = 0.0
+        self.cooldown_records = {}  # Bounded safe metadata; keys are internal HMAC scopes.
         self.global_attempt_times = deque()
         self.active_jobs = 0
         self.reserved_slots = 0
@@ -139,7 +141,7 @@ class MemoryStore:
         if remaining > 0:
             raise AppError("cooldown", 429, remaining)
 
-    def cooldown(self, token_key: str, seconds: float, global_scope: bool = False):
+    def cooldown(self, token_key: str, seconds: float, global_scope: bool = False, *, reason='local_policy', source='local_policy', usage=None, error_code=None):
         self.cleanup()
         expiry = time.monotonic() + seconds
         if global_scope:
@@ -149,6 +151,53 @@ class MemoryStore:
         else:
             # Never evict an active cooldown; conservatively stop all Graph work.
             self.global_cooldown_until = max(self.global_cooldown_until, expiry)
+            global_scope=True
+            reason,source='local_scope_capacity','local_policy'
+        if global_scope: scope='global'
+        else: scope=token_key
+        allowed_reasons={'local_policy','local_scope_capacity','local_usage_saturated','retry_after','meta_http_429','meta_rate_limit'}
+        allowed_sources={'local_policy','x-app-usage','x-business-use-case-usage','retry-after','http_status','error_code'}
+        if reason not in allowed_reasons: reason='local_policy'
+        if source not in allowed_sources: source='local_policy'
+        if scope not in self.cooldown_records and len(self.cooldown_records)>=self.settings.max_token_entries+1:
+            # Evict only inactive diagnostic history, never a live gate.
+            inactive=[key for key in self.cooldown_records if key!='global' and self.token_cooldowns.get(key,0)<=time.monotonic()]
+            if inactive: self.cooldown_records.pop(inactive[0],None)
+        if scope in self.cooldown_records or len(self.cooldown_records)<self.settings.max_token_entries+1:
+            records=self.cooldown_records.setdefault(scope,{})
+            key=(reason,source,error_code if type(error_code) is int else None)
+            if key not in records and len(records)>=4:
+                records.pop(min(records,key=lambda k:records[k]['until']),None)
+            previous=records.get(key)
+            if previous is None or expiry>previous['until']:
+                numeric=usage if type(usage) in {int,float} and math.isfinite(usage) and 0<=usage<=10000 else None
+                try: expires_at=datetime.fromtimestamp(time.time()+max(0,seconds),timezone.utc).isoformat()
+                except (OverflowError,OSError,ValueError): expires_at=None
+                records[key]={'until':expiry,'reason':reason,'source':source,'scope':'global' if global_scope else 'token',
+                    'usage':numeric,'error_code':error_code if type(error_code) is int and 0<=error_code<=2147483647 else None,
+                    'policy':'meta' if reason in {'retry_after','meta_http_429','meta_rate_limit'} else 'local',
+                    'expires_at':expires_at}
+
+    def cooldown_summary(self, scopes):
+        now=time.monotonic()
+        candidates=[]
+        for key in {'global',*scopes}:
+            gate=self.global_cooldown_until if key=='global' else self.token_cooldowns.get(key,0)
+            if gate<=now: continue
+            for record in self.cooldown_records.get(key,{}).values():
+                if now<record['until']<=gate:
+                    candidates.append(record)
+        if not candidates: return None
+        priority={'meta_http_429':3,'meta_rate_limit':2,'retry_after':1}
+        chosen=max(candidates,key=lambda r:(r['until'],priority.get(r['reason'],0),r['error_code'] is not None))
+        return {k:v for k,v in chosen.items() if k!='until'}|{'remaining_seconds':math.ceil(chosen['until']-now)}
+
+    def last_cooldown_summary(self,scopes):
+        records=[record for key in {'global',*scopes} for record in self.cooldown_records.get(key,{}).values()]
+        if not records: return None
+        chosen=max(records,key=lambda record:record['until'])
+        active=self.cooldown_summary(scopes)
+        return {k:v for k,v in chosen.items() if k!='until'}|{'active':active is not None,'remaining_seconds':active['remaining_seconds'] if active else 0}
 
     def begin(self, browser_id: str | None, session_id: str | None, token_key: str):
         browser = self.browser(browser_id)
@@ -278,5 +327,6 @@ class MemoryStore:
         self.sessions.clear()
         self.browsers.clear()
         self.token_cooldowns.clear()
+        self.cooldown_records.clear()
         self.global_attempt_times.clear()
         self.audits.clear()

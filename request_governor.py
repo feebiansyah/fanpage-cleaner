@@ -1,6 +1,8 @@
 """One process-wide spacing/concurrency gate, not a Meta quota."""
 import asyncio
 import time
+import math
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from errors import AppError
 
@@ -14,15 +16,58 @@ class RequestGovernor:
         self.last_dispatch_at=0
         self.lock=asyncio.Lock()
         self.slots=asyncio.Semaphore(settings.graph_request_concurrency)
+        self.usage_states={}
+        self.low_observations=0
+        self.last_usage=None
+        self.saturation_paused=set()
 
-    def observe_usage(self, percent):
+    def observe_usage(self, percent, *, bucket='direct', source='local_policy', metrics=None, adapt=True, complete=True):
+        if type(percent) not in {int,float} or not math.isfinite(percent) or not 0<=percent<=10000: return
         self.usage_known=True
-        if percent >= 50:
-            factor=4 if percent >= 80 else 2
-            before=self.interval
-            self.interval=max(self.interval,min(self.settings.graph_max_interval,self.settings.graph_request_interval*factor))
-            if self.next_at>0:
-                self.next_at+=self.interval-before
+        now=time.monotonic()
+        self.usage_states={key:value for key,value in self.usage_states.items() if value['seen']>now-300}
+        self.saturation_paused.intersection_update(self.usage_states)
+        if bucket not in self.usage_states and len(self.usage_states)>=self.settings.max_token_entries:
+            # Unknown capacity is not permission to speed up.
+            self.low_observations=0
+            if percent>=self.settings.usage_threshold: self.interval=self.settings.graph_max_interval
+            return
+        self.usage_states[bucket]={'percent':percent,'seen':now,'source':source,'metrics':dict(metrics or {}),'complete':complete,'observed_at':datetime.now(timezone.utc).isoformat()}
+        if percent<min(self.settings.usage_threshold,90): self.saturation_paused.discard(bucket)
+        if not adapt: return
+        peak=max(self.usage_states.values(),key=lambda value:value['percent'])
+        self.last_usage={key:peak[key] for key in ('source','percent','metrics','observed_at')}
+        worst=max(value['percent'] for value in self.usage_states.values())
+        before=self.interval
+        if worst>=self.settings.usage_threshold:
+            self.low_observations=0
+            self.interval=min(self.settings.graph_max_interval,max(before*1.25,self.settings.graph_request_interval*6))
+        elif worst>=50:
+            self.low_observations=0
+            factor=4 if worst>=80 else 2
+            self.interval=max(before,min(self.settings.graph_max_interval,self.settings.graph_request_interval*factor))
+        elif all(value['complete'] for value in self.usage_states.values()):
+            self.low_observations+=1
+            if self.low_observations>=3:
+                self.interval=max(self.settings.graph_request_interval,before*.8)
+                self.low_observations=0
+        else:
+            self.low_observations=0
+        if self.next_at>0: self.next_at+=self.interval-before
+
+    def usage_unavailable(self):
+        self.usage_known=False
+        self.low_observations=0
+
+    def rate_limited(self):
+        before=self.interval
+        self.interval=max(before,min(self.settings.graph_max_interval,self.settings.graph_request_interval*6))
+        self.low_observations=0
+        if self.next_at>0: self.next_at+=self.interval-before
+
+    def pacing_summary(self):
+        return {'interval_seconds':round(self.interval,6),'usage_known':self.usage_known,
+                'last_usage':dict(self.last_usage) if self.last_usage else None}
 
     async def _acquire(self, primitive, deadline):
         if not primitive.locked():

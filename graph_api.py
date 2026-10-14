@@ -120,9 +120,9 @@ class GraphClient:
                         instruction = retry_after(response.headers.get('retry-after'))
                         if instruction is not None:
                             # Install before releasing the shared permit, even with invalid body.
-                            self.store.cooldown(token_key, instruction, global_scope=status==429)
+                            self.store.cooldown(token_key,instruction,reason='retry_after',source='retry-after')
                         if status == 429:
-                            self.store.cooldown(token_key, max(instruction or 0,self.settings.cooldown_seconds),True)
+                            self.store.cooldown(token_key,max(instruction or 0,self.settings.cooldown_seconds),reason='meta_http_429',source='http_status')
                         body = bytearray()
                         observation['phase']='response_body'
                         async for chunk in response.aiter_bytes():
@@ -167,8 +167,9 @@ class GraphClient:
             else:
                 code=None
             if status==429 or code in {4,17,32,613,80001,80002,80003,80004,80005,80006}:
+                self.store.governor.rate_limited()
                 seconds=max(instruction or 0,self.settings.cooldown_seconds)
-                self.store.cooldown(token_key,seconds,global_scope=code!=17)
+                self.store.cooldown(token_key,seconds,reason='meta_http_429' if status==429 else 'meta_rate_limit',source='http_status' if status==429 else 'error_code',error_code=code)
                 return result('failed','rate_limited',math.ceil(seconds))
             if code in {102,190} or status==401:
                 return result('failed','token_invalid')
@@ -284,8 +285,10 @@ class GraphClient:
 
     def _usage(self, headers, token_key):
         # Only numeric allowlisted values are inspected; raw headers are never retained/logged.
-        self.store.governor.usage_known=False
-        for header, global_scope in [("x-app-usage", True), ("x-business-use-case-usage", True)]:
+        previous_low=self.store.governor.low_observations
+        self.store.governor.usage_unavailable()
+        observations=[]
+        for header in ("x-app-usage", "x-business-use-case-usage"):
             raw = headers.get(header)
             if not raw or len(raw) > 16384:
                 continue
@@ -296,19 +299,46 @@ class GraphClient:
             if not isinstance(usage, dict):
                 continue
             if header == "x-app-usage":
-                items = [usage]
+                items = [('app',usage)]
             else:
-                items = [entry for entries in usage.values() if isinstance(entries, list) for entry in entries]
-            for item in items:
+                items = [(identity+':'+entry.get('type',''),entry) for identity,entries in usage.items()
+                    if isinstance(identity,str) and re.fullmatch('[0-9]{1,40}',identity) and isinstance(entries,list)
+                    for entry in entries if isinstance(entry,dict) and isinstance(entry.get('type'),str)
+                    and re.fullmatch('[a-z][a-z0-9_]{0,79}',entry['type'])]
+            for identity,item in items:
                 if not isinstance(item, dict):
                     continue
-                values = [item.get(key) for key in ("call_count", "total_time", "total_cputime")]
-                values = [v for v in values if type(v) in {int, float} and 0 <= v <= 100 and math.isfinite(v)]
-                if values:
-                    self.store.governor.observe_usage(max(values))
-                if values and max(values) >= self.settings.usage_threshold:
-                    # Local safety policy, not a claim about official quota/reset timing.
-                    self.store.cooldown(token_key, self.settings.cooldown_seconds, global_scope)
+                if any(key in item and not (type(item[key]) in {int,float} and math.isfinite(item[key]) and 0<=item[key]<=10000)
+                       for key in ('call_count','total_time','total_cputime')):
+                    continue
+                metrics={key:item[key] for key in ('call_count','total_time','total_cputime')
+                    if type(item.get(key)) in {int,float} and math.isfinite(item[key]) and 0<=item[key]<=10000}
+                if metrics:
+                    observations.append((header,identity,metrics,max(metrics.values())))
+        # Duplicate rows for one bucket are one observation: retain the highest
+        # reported metric so a low row cannot rearm a still-saturated bucket.
+        grouped={}
+        for source,identity,metrics,percent in observations:
+            key=(source,identity)
+            combined=grouped.setdefault(key,{})
+            for metric,value in metrics.items(): combined[metric]=max(combined.get(metric,0),value)
+        observations=[(source,identity,metrics,max(metrics.values()))
+                      for (source,identity),metrics in grouped.items()]
+        # Record all scopes first; a low BUC row must not speed up pacing while
+        # another known bucket is high. Exactly one recovery vote per response.
+        governor=self.store.governor
+        for source,identity,metrics,percent in sorted(observations,key=lambda item:item[3]):
+            bucket=source+':'+token_key+':'+self.store.token_key(identity)
+            governor.observe_usage(percent,bucket=bucket,source=source,metrics=metrics,adapt=False,complete=len(metrics)==3)
+            if percent>=100 and bucket in governor.usage_states and bucket not in governor.saturation_paused:
+                # Local saturation safety, not an inferred app-wide Meta order.
+                self.store.cooldown(token_key,self.settings.cooldown_seconds,reason='local_usage_saturated',source=source,usage=percent)
+                if bucket in governor.usage_states: governor.saturation_paused.add(bucket)
+            if percent>=100: governor.interval=self.settings.graph_max_interval
+        if observations:
+            source,identity,metrics,percent=max(observations,key=lambda item:item[3])
+            governor.low_observations=previous_low
+            governor.observe_usage(percent,bucket=source+':'+token_key+':'+self.store.token_key(identity),source=source,metrics=metrics,complete=len(metrics)==3)
 
     async def _request(self, token, token_key, cursor, deadline):
         params = {"fields": "id,name,access_token", "limit": str(self.settings.page_size)}
@@ -370,8 +400,6 @@ class GraphClient:
                             observation['error_code' if key=='code' else 'error_subcode']=value if type(value) is int and 0<=value<=2147483647 else None
                         for key in ('message','error_user_msg'):
                             observation['error_message' if key=='message' else key]=sanitized_meta_message(error.get(key),tokens)
-                    if instruction is not None:
-                        self.store.cooldown(token_key,instruction,global_scope=status==429)
                 code = error.get("code") if isinstance(error, dict) else None
                 code = code if type(code) is int else None
                 if code in {102, 190} or status == 401:
@@ -379,9 +407,10 @@ class GraphClient:
                 if code in {10, 200}:
                     raise AppError("permission_denied", 403)
                 if status == 429 or code in {4, 17, 32, 613, 80001, 80002, 80003, 80004, 80005, 80006}:
+                    self.store.governor.rate_limited()
                     seconds = max(instruction or 0, self.settings.cooldown_seconds)
                     # App/unknown/page scope conservatively stops all local Graph work.
-                    self.store.cooldown(token_key, seconds, global_scope=code != 17)
+                    self.store.cooldown(token_key,seconds,reason='meta_http_429' if status==429 else 'meta_rate_limit',source='http_status' if status==429 else 'error_code',error_code=code)
                     raise AppError("rate_limited", 429, math.ceil(seconds))
                 if status == 403:
                     raise AppError("permission_denied", 403)
@@ -403,7 +432,7 @@ class GraphClient:
             wait = self.settings.retry_base * (2 ** attempt) + random.uniform(0, self.settings.retry_jitter)
             if instruction is not None:
                 wait = max(wait, instruction)
-                self.store.cooldown(token_key, instruction)
+                self.store.cooldown(token_key,instruction,reason='retry_after',source='retry-after')
                 if instruction > self.settings.max_retry_wait or time.monotonic() + wait >= deadline:
                     raise AppError("cooldown", 429, max(1, math.ceil(instruction)))
             if attempt == 2:
@@ -422,4 +451,9 @@ class GraphClient:
             await self.store.governor.pace_dispatch(token_key,deadline,on_request)
             async with self.http.stream('GET',endpoint,params=params,headers={'Authorization':'Bearer '+token}) as response:
                 self._usage(response.headers,token_key)
+                instruction=retry_after(response.headers.get('retry-after'))
+                if instruction is not None:
+                    self.store.cooldown(token_key,instruction,reason='retry_after',source='retry-after')
+                if response.status_code==429:
+                    self.store.cooldown(token_key,max(instruction or 0,self.settings.cooldown_seconds),reason='meta_http_429',source='http_status')
                 yield response

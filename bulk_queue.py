@@ -298,6 +298,7 @@ class BulkQueue:
                 changes=[compact(job.targets[index]) for _,index in updates]
                 next_revision=updates[-1][0] if updates else job.revision
                 more=next_revision<job.revision
+            scopes={t.scope for t in job.targets}
             cooldown=max(0,self.store.global_cooldown_until-time.monotonic(),
                 max((self.store.token_cooldowns.get(t.scope,0)-time.monotonic() for t in job.targets if t.status in {'queued','processing'}),default=0))
             return {'job_id':job.id,'mode':job.mode,'state':job.state,'terminal':job.terminal,
@@ -309,6 +310,9 @@ class BulkQueue:
                     'offset':offset,'page_size':50,'result_total':len(job.targets),
                     'revision':job.revision,'next_revision':next_revision,'changes':changes,'has_more_changes':more,'reset_required':reset,
                     'cooldown_seconds':math.ceil(cooldown),
+                    'cooldown':self.store.cooldown_summary(scopes),
+                    'last_cooldown':self.store.last_cooldown_summary(scopes),
+                    'pacing':self.store.governor.pacing_summary(),
                     'stop_reason':job.stop_reason,'message':'Operasi menargetkan ID Post atau video/Reel asli sesuai snapshot; sukses mensyaratkan respons Meta yang ketat.'}
         targets=job.targets
         return {'job_id':job.id,'mode':'dry_run','state':job.state,'terminal':job.terminal,

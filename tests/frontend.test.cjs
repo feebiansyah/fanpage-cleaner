@@ -25,7 +25,7 @@ function setup(responses) {
     'load-posts', 'max-posts', 'content-list', 'select-all', 'selected-count', 'load-status', 'audit-warning', 'local-pagination', 'load-progress',
     'fanpage-search', 'fanpage-search-status', 'source-diagnostics', 'stop-load', 'dry-run', 'dry-status', 'dry-results', 'dry-pagination',
     'delete-one', 'delete-one-reel', 'delete-dialog-title', 'delete-warning', 'delete-manual-text', 'delete-help', 'delete-dialog', 'delete-details', 'delete-manual-check', 'delete-cancel', 'delete-confirm', 'delete-status',
-    'delete-diagnosis', 'delete-read-last', 'delete-selected', 'bulk-dialog', 'bulk-details', 'bulk-preview-pagination', 'bulk-pagination', 'bulk-manual-check', 'bulk-cancel', 'bulk-confirm', 'bulk-status', 'bulk-results', 'bulk-read', 'access-post', 'access-post-result'];
+    'delete-diagnosis', 'delete-read-last', 'delete-selected', 'bulk-dialog', 'bulk-details', 'bulk-preview-pagination', 'bulk-pagination', 'bulk-manual-check', 'bulk-cancel', 'bulk-confirm', 'bulk-status', 'bulk-technical', 'bulk-technical-content', 'bulk-results', 'bulk-read', 'access-post', 'access-post-result'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id === 'fanpage' ? 'select' : 'div')]));
   elements['max-posts'].value = '100';
   const requests = [];
@@ -789,6 +789,52 @@ const bulkPreview = {confirmation_id:'bulk-cid',expires_in_seconds:60,selected:2
     {supported:false,page_id:'11',page_name:'Original Page',key:'published_posts:11_1',kind:'Story',reason:'identified_story',message:'Story ditolak'}]};
 const bulkJob = {job_id:'bulk-job',terminal:true,state:'completed',selected:2,total:1,duplicates:0,completed:1,succeeded:1,pages:[{page_id:'11',name:'Original Page'}],
   counts:{queued:0,processing:0,succeeded:1,failed:0,uncertain:0,blocked:0,cancelled:0},items:[{page_id:'11',key:'published_posts:11_0',delete_target:'11_0',status:'succeeded',reasons:['success_boolean_true'],details:bulkPreview.items[0],diagnostic:{http_status:200,raw_body:'secret-token'}}]};
+test('queue distinguishes local usage saturation from Meta cooldown with safe collapsed details',async()=>{
+  for (const [reason,source,policy,label] of [
+    ['local_usage_saturated','x-app-usage','local','Penggunaan API tinggi (jeda lokal)'],
+    ['retry_after','retry-after','meta','Meta meminta menunggu'],
+    ['meta_http_429','http_status','meta','Meta meminta menunggu'],
+    ['meta_rate_limit','error_code','meta','Meta meminta menunggu'],
+    ['local_policy','local_policy','local','Jeda kebijakan lokal'],
+    ['local_scope_capacity','local_policy','local','Menunggu kapasitas lokal'],
+  ]) {
+    const cooldown={reason,source,policy,scope:'token',expires_at:'2026-10-14T10:00:00Z',remaining_seconds:7,usage:100,error_code:4,
+      raw_headers:'unsafe-secret',token_key:'unsafe-secret'};
+    const running={...bulkJob,terminal:false,state:'cooldown',cooldown_seconds:7,cooldown,pacing:{interval_seconds:3,usage_known:false},items:[]};
+    const {elements}=setup([connected,{jobs:[running]}]);await tick();await elements['bulk-read'].events.click();
+    assert.ok(elements['bulk-status'].textContent.includes(label));
+    assert.match(elements['bulk-status'].textContent,/Jeda API 7 detik/);
+    assert.equal(elements['bulk-technical'].hidden,false);assert.notEqual(elements['bulk-technical'].open,true);
+    const detail=JSON.stringify(elements['bulk-technical-content'].children);
+    for (const value of [source,reason,'token','2026-10-14T10:00:00Z','100%','Usage terbaru tidak tersedia']) assert.ok(detail.includes(value),value);
+    assert.doesNotMatch(detail,/unsafe-secret|raw_headers|token_key/);
+    assert.equal(elements['bulk-results'].children.length,0);
+  }
+});
+
+test('expired cooldown stays in collapsed history without showing an active wait',async()=>{
+  const running={...bulkJob,terminal:false,state:'running',cooldown_seconds:0,cooldown:null,last_cooldown:{reason:'retry_after',source:'retry-after',scope:'global',policy:'meta',expires_at:'2026-10-14T09:00:00Z',remaining_seconds:0,active:false,usage:null,error_code:4,raw_headers:'unsafe-secret'},items:[]};
+  const {elements}=setup([connected,{jobs:[running]}]);await tick();await elements['bulk-read'].events.click();
+  assert.doesNotMatch(elements['bulk-status'].textContent,/Meta meminta menunggu|Jeda API|jeda lokal/);
+  assert.equal(elements['bulk-technical'].hidden,false);assert.notEqual(elements['bulk-technical'].open,true);
+  const detail=JSON.stringify(elements['bulk-technical-content'].children);
+  for(const value of ['Jeda terakhir (sudah berakhir)','retry_after','retry-after','global','2026-10-14T09:00:00Z','sisa: 0 detik']) assert.ok(detail.includes(value),value);
+  assert.doesNotMatch(detail,/unsafe-secret|raw_headers/);
+});
+
+test('high usage shows adaptive pacing without implying Meta cooldown',async()=>{
+  const running={...bulkJob,terminal:false,state:'running',cooldown_seconds:0,cooldown:null,pacing:{interval_seconds:2.5,usage_known:true,
+    last_usage:{source:'x-business-use-case-usage',percent:99,metrics:{call_count:99,total_time:70,total_cputime:60},observed_at:'2026-10-14T09:59:00Z',raw_headers:'unsafe-secret'}},items:[]};
+  const {elements,timers}=setup([connected,{jobs:[running]}, {...running,pacing:{interval_seconds:1,usage_known:false,last_usage:null}}]);
+  await tick();await elements['bulk-read'].events.click();
+  assert.match(elements['bulk-status'].textContent,/Penggunaan API tinggi; interval request 2.5 detik/);
+  assert.doesNotMatch(elements['bulk-status'].textContent,/Meta meminta menunggu|jeda lokal|Jeda API/);
+  const detail=JSON.stringify(elements['bulk-technical-content'].children);
+  assert.match(detail,/x-business-use-case-usage/);assert.match(detail,/99%/);assert.match(detail,/call_count: 99/);assert.doesNotMatch(detail,/unsafe-secret|raw_headers/);
+  await timers.filter(t=>t.delay===1000).at(-1).fn();
+  assert.doesNotMatch(elements['bulk-status'].textContent,/Penggunaan API tinggi|Usage terbaru/);
+  assert.match(JSON.stringify(elements['bulk-technical-content'].children),/Usage terbaru tidak tersedia/);
+});
 test('large confirmation preview pages fifty local targets without another request',async()=>{
   const preview={...bulkPreview,selected:5000,supported:5000,unsupported:0,max_targets:5000,expires_in_seconds:600,
     items:Array.from({length:5000},(_,i)=>({...bulkPreview.items[0],key:`target:${i}`}))};

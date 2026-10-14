@@ -40,6 +40,8 @@
   const bulkButton = document.getElementById("delete-selected");
   const bulkDialog = document.getElementById("bulk-dialog");
   const bulkDetails = document.getElementById("bulk-details");
+  const bulkTechnical = document.getElementById("bulk-technical");
+  const bulkTechnicalContent = document.getElementById("bulk-technical-content");
   const bulkManual = document.getElementById("bulk-manual-check");
   const bulkCancel = document.getElementById("bulk-cancel");
   const bulkConfirm = document.getElementById("bulk-confirm");
@@ -766,6 +768,8 @@
     bulkOffset = 0; bulkRevision = 0; bulkPageGeneration += 1;
     bulkPagination.replaceChildren();
     bulkResults.replaceChildren(); bulkStatus.textContent = "";
+    if (bulkTechnical) { bulkTechnical.hidden = true; bulkTechnical.open = false; }
+    bulkTechnicalContent?.replaceChildren();
   }
   function bulkLine(parent, text) {
     const line = document.createElement("p"); line.textContent = text; parent.appendChild(line);
@@ -861,6 +865,49 @@
       } catch (error) { if (generation === bulkGeneration && requestGeneration === bulkPageGeneration) { bulkStatus.textContent = error.message; pollBulk(); } }
     });
   }
+  function renderBulkTiming(data) {
+    const cooldown = data.cooldown;
+    const pacing = data.pacing;
+    const seconds = Number.isFinite(data.cooldown_seconds) ? data.cooldown_seconds : cooldown?.remaining_seconds;
+    const active = Number.isFinite(seconds) && seconds > 0;
+    const reasons = {
+      local_usage_saturated: "Penggunaan API tinggi (jeda lokal)",
+      retry_after: "Meta meminta menunggu", meta_http_429: "Meta meminta menunggu", meta_rate_limit: "Meta meminta menunggu",
+      local_policy: "Jeda kebijakan lokal", local_scope_capacity: "Menunggu kapasitas lokal",
+    };
+    if (active) {
+      if (reasons[cooldown?.reason]) bulkStatus.textContent += ` ${reasons[cooldown.reason]}.`;
+      bulkStatus.textContent += ` Jeda API ${Math.ceil(seconds)} detik.`;
+    } else if (!data.terminal && pacing?.usage_known && Number.isFinite(pacing.last_usage?.percent) && pacing.last_usage.percent >= 90 && Number.isFinite(pacing.interval_seconds)) {
+      bulkStatus.textContent += ` Penggunaan API tinggi; interval request ${pacing.interval_seconds} detik.`;
+    }
+    if (!bulkTechnical || !bulkTechnicalContent) return;
+    bulkTechnicalContent.replaceChildren();
+    const technicalCooldown = cooldown || data.last_cooldown;
+    bulkTechnical.hidden = !technicalCooldown && !pacing;
+    // Display only known metadata fields, never raw headers or token identifiers.
+    const sources = new Set(["x-app-usage", "x-business-use-case-usage", "retry-after", "http_status", "error_code", "local_policy"]);
+    if (technicalCooldown) {
+      const detail = technicalCooldown;
+      if (!active) bulkLine(bulkTechnicalContent, "Jeda terakhir (sudah berakhir).");
+      bulkLine(bulkTechnicalContent, `Alasan: ${reasons[detail.reason] ? detail.reason : "tidak tersedia"}; sumber: ${sources.has(detail.source) ? detail.source : "tidak tersedia"}; scope: ${["token", "global"].includes(detail.scope) ? detail.scope : "tidak tersedia"}; kebijakan: ${["local", "meta"].includes(detail.policy) ? detail.policy : "tidak tersedia"}.`);
+      const end = typeof detail.expires_at === "string" && /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|\+00:00)$/.test(detail.expires_at) ? detail.expires_at : "tidak tersedia";
+      bulkLine(bulkTechnicalContent, `Akhir jeda (UTC): ${end}; sisa: ${active ? Math.ceil(seconds) : 0} detik.`);
+      if (Number.isFinite(detail.usage)) bulkLine(bulkTechnicalContent, `Penggunaan saat jeda: ${detail.usage}%.`);
+      if (Number.isFinite(detail.error_code)) bulkLine(bulkTechnicalContent, `Kode error Meta: ${detail.error_code}.`);
+    }
+    if (pacing) {
+      if (Number.isFinite(pacing.interval_seconds)) bulkLine(bulkTechnicalContent, `Interval request: ${pacing.interval_seconds} detik.`);
+      const usage = pacing.last_usage;
+      if (!pacing.usage_known || !usage) bulkLine(bulkTechnicalContent, "Usage terbaru tidak tersedia.");
+      else {
+        bulkLine(bulkTechnicalContent, `Sumber usage: ${sources.has(usage.source) ? usage.source : "tidak tersedia"}; penggunaan: ${Number.isFinite(usage.percent) ? `${usage.percent}%` : "tidak tersedia"}.`);
+        for (const metric of ["call_count", "total_time", "total_cputime"])
+          if (Number.isFinite(usage.metrics?.[metric])) bulkLine(bulkTechnicalContent, `${metric}: ${usage.metrics[metric]}%.`);
+        if (typeof usage.observed_at === "string" && /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|\+00:00)$/.test(usage.observed_at)) bulkLine(bulkTechnicalContent, `Usage diamati (UTC): ${usage.observed_at}.`);
+      }
+    }
+  }
   function renderBulk(data) {
     if (bulkJob?.job_id !== data.job_id) { bulkOffset = 0; bulkRevision = 0; }
     bulkOffset = data.offset ?? bulkOffset;
@@ -870,7 +917,7 @@
     const states = {queued:"Menunggu antrean", running:"Penghapusan berjalan", cooldown:"Menunggu jeda API", stopping:"Menghentikan proses", completed:"Proses selesai", cancelled:"Proses dihentikan", failed:"Proses selesai", paused_needs_reconnect:"Hubungkan kembali Facebook"};
     const unsupported = data.unsupported ?? counts.unsupported ?? 0;
     bulkStatus.textContent = `${(data.pages || []).map(page => page.name).join(", ")}: ${states[data.state] || "Status belum tersedia"}; selesai ${data.completed}/${data.total}. Berhasil ${counts.succeeded || 0}, gagal ${counts.failed || 0}, belum pasti ${counts.uncertain || 0}, dihentikan ${(counts.cancelled || 0) + (counts.blocked || 0)}, tidak didukung ${unsupported}.${data.terminal ? "" : ` Menunggu ${counts.queued || 0}, memproses ${counts.processing || 0}.`}`;
-    if (Number.isFinite(data.cooldown_seconds) && data.cooldown_seconds > 0) bulkStatus.textContent += ` Jeda API ${Math.ceil(data.cooldown_seconds)} detik.`;
+    renderBulkTiming(data);
     bulkResults.replaceChildren();
     for (const item of (data.items || []).slice(0, DISPLAY_SIZE)) {
       const row = document.createElement("details");
